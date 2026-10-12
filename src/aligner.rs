@@ -115,6 +115,24 @@ fn is_null_wf(ptr: *mut crate::wavefront::Wavefront) -> bool {
     ptr.is_null() || unsafe { (*ptr).null }
 }
 
+/// `ptr` if it holds a non-empty wavefront, else `WF_PTR_NONE` (read as the
+/// null wavefront, as C's `wavefront_compute_get_*wavefront` does).
+#[inline(always)]
+fn live_or_none(ptr: *mut crate::wavefront::Wavefront) -> *mut crate::wavefront::Wavefront {
+    if is_null_wf(ptr) { WF_PTR_NONE } else { ptr }
+}
+
+/// lo/hi of an input wavefront; a missing one has the null wavefront's
+/// bounds (lo = 1, hi = -1), which C includes in the input range union.
+#[inline(always)]
+fn null_wf_bounds(ptr: *mut crate::wavefront::Wavefront) -> (i32, i32) {
+    if ptr.is_null() {
+        (1, -1)
+    } else {
+        unsafe { ((*ptr).lo, (*ptr).hi) }
+    }
+}
+
 impl<const N: usize> WavefrontAligner<N> {
     /// Create a new aligner with the given penalties.
     pub fn new(penalties: WavefrontPenalties) -> Self {
@@ -839,18 +857,6 @@ impl<const N: usize> WavefrontAligner<N> {
             WF_PTR_NONE
         };
 
-        // Get effective lo/hi from input wavefronts
-        let (misms_lo, misms_hi) = if !misms_ptr.is_null() {
-            unsafe { ((*misms_ptr).lo, (*misms_ptr).hi) }
-        } else {
-            (0, -1) // empty range
-        };
-        let (gap_lo, gap_hi) = if !gap_ptr.is_null() {
-            unsafe { ((*gap_ptr).lo, (*gap_ptr).hi) }
-        } else {
-            (0, -1) // empty range
-        };
-
         // All inputs missing or trimmed-empty: null output (C's
         // `wavefront_compute_allocate_output_null`), counted as a null step by
         // extend. Computing from them would widen the range every step.
@@ -858,6 +864,13 @@ impl<const N: usize> WavefrontAligner<N> {
             self.set_null_output_m(score_curr);
             return;
         }
+
+        // Trimmed-empty inputs are read as the null wavefront, like missing ones,
+        // whose bounds (lo = 1, hi = -1) still enter the range union as in C.
+        let misms_ptr = live_or_none(misms_ptr);
+        let gap_ptr = live_or_none(gap_ptr);
+        let (misms_lo, misms_hi) = null_wf_bounds(misms_ptr);
+        let (gap_lo, gap_hi) = null_wf_bounds(gap_ptr);
 
         // Union of ranges (gap expands by ±1 for ins/del k-shifts), clamped to
         // leave room for the kernel's k±1 reads within the allocated range.
@@ -959,15 +972,31 @@ impl<const N: usize> WavefrontAligner<N> {
             (WF_PTR_NONE, WF_PTR_NONE)
         };
 
-        // Compute effective lo/hi from pointers (no slab re-lookup)
-        let mut lo = i32::MAX;
-        let mut hi = i32::MIN;
-        unsafe {
-            if !ptr_m_misms.is_null() { lo = lo.min((*ptr_m_misms).lo);     hi = hi.max((*ptr_m_misms).hi);     }
-            if !ptr_m_open.is_null()  { lo = lo.min((*ptr_m_open).lo - 1);  hi = hi.max((*ptr_m_open).hi + 1);  }
-            if !ptr_i1_ext.is_null()  { lo = lo.min((*ptr_i1_ext).lo + 1);  hi = hi.max((*ptr_i1_ext).hi + 1);  }
-            if !ptr_d1_ext.is_null()  { lo = lo.min((*ptr_d1_ext).lo - 1);  hi = hi.max((*ptr_d1_ext).hi - 1);  }
+        // All inputs missing or trimmed-empty: null output (C's
+        // `wavefront_compute_allocate_output_null`), counted as a null step by extend.
+        if is_null_wf(ptr_m_misms)
+            && is_null_wf(ptr_m_open)
+            && is_null_wf(ptr_i1_ext)
+            && is_null_wf(ptr_d1_ext)
+        {
+            self.free_output_wavefronts_affine(out_slot);
+            return;
         }
+
+        // Trimmed-empty inputs are read as the null wavefront, like missing ones.
+        let ptr_m_misms = live_or_none(ptr_m_misms);
+        let ptr_m_open = live_or_none(ptr_m_open);
+        let ptr_i1_ext = live_or_none(ptr_i1_ext);
+        let ptr_d1_ext = live_or_none(ptr_d1_ext);
+
+        // Effective lo/hi over all inputs. As in C's `wavefront_compute_limits_input`,
+        // null inputs contribute the null wavefront's bounds (lo = 1, hi = -1).
+        let (misms_lo, misms_hi) = null_wf_bounds(ptr_m_misms);
+        let (open_lo, open_hi) = null_wf_bounds(ptr_m_open);
+        let (i1_lo, i1_hi) = null_wf_bounds(ptr_i1_ext);
+        let (d1_lo, d1_hi) = null_wf_bounds(ptr_d1_ext);
+        let mut lo = misms_lo.min(open_lo - 1).min(i1_lo + 1).min(d1_lo - 1);
+        let mut hi = misms_hi.max(open_hi + 1).max(i1_hi + 1).max(d1_hi - 1);
 
         if lo > hi {
             if self.wf_components.memory_modular {
@@ -1123,23 +1152,57 @@ impl<const N: usize> WavefrontAligner<N> {
             (WF_PTR_NONE, WF_PTR_NONE)
         };
 
+        // All inputs missing or trimmed-empty: null output (C's
+        // `wavefront_compute_allocate_output_null`), counted as a null step by extend.
+        if is_null_wf(ptr_m_misms)
+            && is_null_wf(ptr_m_open1)
+            && is_null_wf(ptr_m_open2)
+            && is_null_wf(ptr_i1_ext)
+            && is_null_wf(ptr_d1_ext)
+            && is_null_wf(ptr_i2_ext)
+            && is_null_wf(ptr_d2_ext)
+        {
+            self.free_output_wavefronts_affine2p(out_slot);
+            return;
+        }
+
+        // Trimmed-empty inputs are read as the null wavefront, like missing ones.
+        let ptr_m_misms = live_or_none(ptr_m_misms);
+        let ptr_m_open1 = live_or_none(ptr_m_open1);
+        let ptr_m_open2 = live_or_none(ptr_m_open2);
+        let ptr_i1_ext = live_or_none(ptr_i1_ext);
+        let ptr_d1_ext = live_or_none(ptr_d1_ext);
+        let ptr_i2_ext = live_or_none(ptr_i2_ext);
+        let ptr_d2_ext = live_or_none(ptr_d2_ext);
+
         // When all O2/E2 inputs are null, dispatch to the affine kernel (3 components).
         let i2_active = !ptr_m_open2.is_null() || !ptr_i2_ext.is_null();
         let d2_active = !ptr_m_open2.is_null() || !ptr_d2_ext.is_null();
         let use_affine_kernel = !i2_active && !d2_active;
 
-        // Compute effective lo/hi from pointers (no slab re-lookup)
-        let mut lo = i32::MAX;
-        let mut hi = i32::MIN;
-        unsafe {
-            if !ptr_m_misms.is_null() { lo = lo.min((*ptr_m_misms).lo);     hi = hi.max((*ptr_m_misms).hi);     }
-            if !ptr_m_open1.is_null() { lo = lo.min((*ptr_m_open1).lo - 1); hi = hi.max((*ptr_m_open1).hi + 1); }
-            if !ptr_m_open2.is_null() { lo = lo.min((*ptr_m_open2).lo - 1); hi = hi.max((*ptr_m_open2).hi + 1); }
-            if !ptr_i1_ext.is_null()  { lo = lo.min((*ptr_i1_ext).lo  + 1); hi = hi.max((*ptr_i1_ext).hi  + 1); }
-            if !ptr_i2_ext.is_null()  { lo = lo.min((*ptr_i2_ext).lo  + 1); hi = hi.max((*ptr_i2_ext).hi  + 1); }
-            if !ptr_d1_ext.is_null()  { lo = lo.min((*ptr_d1_ext).lo  - 1); hi = hi.max((*ptr_d1_ext).hi  - 1); }
-            if !ptr_d2_ext.is_null()  { lo = lo.min((*ptr_d2_ext).lo  - 1); hi = hi.max((*ptr_d2_ext).hi  - 1); }
-        }
+        // Effective lo/hi over all inputs. As in C's `wavefront_compute_limits_input`,
+        // null inputs contribute the null wavefront's bounds (lo = 1, hi = -1).
+        let (misms_lo, misms_hi) = null_wf_bounds(ptr_m_misms);
+        let (open1_lo, open1_hi) = null_wf_bounds(ptr_m_open1);
+        let (open2_lo, open2_hi) = null_wf_bounds(ptr_m_open2);
+        let (i1_lo, i1_hi) = null_wf_bounds(ptr_i1_ext);
+        let (d1_lo, d1_hi) = null_wf_bounds(ptr_d1_ext);
+        let (i2_lo, i2_hi) = null_wf_bounds(ptr_i2_ext);
+        let (d2_lo, d2_hi) = null_wf_bounds(ptr_d2_ext);
+        let mut lo = misms_lo
+            .min(open1_lo - 1)
+            .min(open2_lo - 1)
+            .min(i1_lo + 1)
+            .min(i2_lo + 1)
+            .min(d1_lo - 1)
+            .min(d2_lo - 1);
+        let mut hi = misms_hi
+            .max(open1_hi + 1)
+            .max(open2_hi + 1)
+            .max(i1_hi + 1)
+            .max(i2_hi + 1)
+            .max(d1_hi - 1)
+            .max(d2_hi - 1);
 
         if lo > hi {
             if self.wf_components.memory_modular {
@@ -2254,6 +2317,92 @@ mod tests {
                 assert_eq!(aligner.status(), AlignStatus::Completed);
             }
         }
+    }
+
+    fn affine_penalties() -> WavefrontPenalties {
+        WavefrontPenalties::new_affine(crate::penalties::AffinePenalties {
+            match_: 0,
+            mismatch: 4,
+            gap_opening: 6,
+            gap_extension: 2,
+        })
+    }
+
+    fn affine2p_penalties() -> WavefrontPenalties {
+        WavefrontPenalties::new_affine2p(crate::penalties::Affine2pPenalties {
+            match_: 0,
+            mismatch: 4,
+            gap_opening1: 6,
+            gap_extension1: 2,
+            gap_opening2: 24,
+            gap_extension2: 1,
+        })
+    }
+
+    #[test]
+    fn test_banded_unreachable_affine_end_unreachable() {
+        // Affine/affine2p must also emit null wavefronts once every input is
+        // trimmed empty, so unreachable banded alignments end as END_UNREACHABLE
+        // (score-only mode previously never terminated). The step cap turns a
+        // regression into a failure instead of a hang.
+        let (pattern, text) = band_excludes_target();
+        let band = HeuristicStrategy::BandedStatic {
+            min_k: -5,
+            max_k: 5,
+        };
+        for scope in [
+            AlignmentScope::ComputeAlignment,
+            AlignmentScope::ComputeScore,
+        ] {
+            let mut affine = AffineAligner::new(affine_penalties());
+            affine.alignment_scope = scope;
+            affine.set_max_alignment_steps(10_000);
+            affine.set_heuristic(band.clone());
+            let score = affine.align_end2end(&pattern, &text);
+            assert_eq!(affine.status(), AlignStatus::EndUnreachable, "{scope:?}");
+            // Give-up score reported by C WFA2-lib (16969b5b) score-only mode.
+            assert_eq!(score, 58, "{scope:?}");
+
+            let mut affine2p = Affine2pAligner::new(affine2p_penalties());
+            affine2p.alignment_scope = scope;
+            affine2p.set_max_alignment_steps(10_000);
+            affine2p.set_heuristic(band.clone());
+            affine2p.align_end2end(&pattern, &text);
+            assert_eq!(affine2p.status(), AlignStatus::EndUnreachable, "{scope:?}");
+        }
+    }
+
+    #[test]
+    fn test_banded_affine_equates_id_only_when_m_narrowed() {
+        // End diagonal k = 12 lies outside the [-10, 10] band, yet C WFA2-lib
+        // (16969b5b) completes this pair: the cutoff leaves I/D alone when M is
+        // empty or unchanged, so they can carry the alignment past the band.
+        // Equating I/D to M on every step made Rust give up instead.
+        // (Porting C #125's band clamp, fork issue #6, is expected to change this.)
+        let pattern = b"GCAAGACGATTAGACTTGATAAATGCAATCATCGACTGTAAACAGACGAGCTGTCCTGGGACACTACTGACCGGATCGACTACCGCGT";
+        let text = b"ACAAGACACGCTCAGTGACTTGCGTCACCATCGAGCATCCGTCTTAGCAACAGGGCTGTCTGGGGCTGCCATACGACCCGCTGACCGCACGTACGGGCCT";
+        let band = HeuristicStrategy::BandedStatic {
+            min_k: -10,
+            max_k: 10,
+        };
+
+        let mut affine = AffineAligner::new(affine_penalties());
+        affine.alignment_scope = AlignmentScope::ComputeAlignment;
+        affine.set_heuristic(band.clone());
+        assert_eq!(affine.align_end2end(pattern, text), 210);
+        assert_eq!(affine.status(), AlignStatus::Completed);
+        assert!(affine.cigar().check_alignment(pattern, text).is_ok());
+
+        // C reports the CIGAR's score; for this band-escaping path it is lower
+        // than the WFA score at which the end was reached.
+        let penalties = affine2p_penalties();
+        let mut affine2p = Affine2pAligner::new(penalties.clone());
+        affine2p.alignment_scope = AlignmentScope::ComputeAlignment;
+        affine2p.set_heuristic(band);
+        affine2p.align_end2end(pattern, text);
+        assert_eq!(affine2p.status(), AlignStatus::Completed);
+        let p2 = penalties.affine2p_penalties.as_ref().unwrap();
+        assert_eq!(affine2p.cigar().score_gap_affine2p(p2), -204);
     }
 
     // --- Gap-linear tests ---
