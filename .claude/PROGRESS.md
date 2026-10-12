@@ -33,7 +33,8 @@ sync" below.
 | banded-adaptive | Differs: Rust applies the static clamp every N steps instead of C's re-centred band (#6) |
 | xdrop / zdrop | Not applied in end-to-end mode (#5) |
 | BiWFA + any heuristic | Heuristics ignored in BiWFA sub-aligners (#6) |
-| ends-free / extension | Not reachable from the CLI (`--wfa-span` unused, #8); `match == 0` begin-free seeding missing (#9) |
+| extension; ends-free with end gaps only | Byte-identical to C (all metrics incl. match < 0, alignment and score-only) |
+| ends-free with begin gaps (P0/T0 > 0) | Differs: begin-free gaps not implemented in the library; output equals global (#9) |
 
 ### Upstream C sync
 

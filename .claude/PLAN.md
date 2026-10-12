@@ -239,14 +239,14 @@ banded path crashes.
 4. [x] #4 Affine/affine2p banded termination and parity (cutoff equate, I/D trim, null inputs; fork PR #14)
 5. [ ] #8 CLI gaps:
    - [x] print `-1  -` for an empty CIGAR, as C does (no alignment found)
-   - [ ] wire up `--wfa-span` (ends-free / extension)
+   - [x] wire up `--wfa-span` (ends-free / extension), rejecting what C rejects
    - [ ] xdrop/zdrop `steps_between_cutoffs` parameter
    - [ ] `--wfa-memory=med|low`
    - [ ] stream input and output (CLI max RSS ~200 MB vs C's 2-10 MB)
    - [ ] document the `./WFA2-lib` checkout needed by the integration tests
 6. [ ] #5 X-drop / Z-drop in end-to-end mode
 7. [ ] #6 BiWFA heuristics; banded-adaptive as in C; port C #125
-8. [ ] #9 Ends-free `match == 0` begin-free seeding; port C #126
+8. [ ] #9 Ends-free begin-free gaps (library stores but never reads `*_begin_free`): `match == 0` initial M seeding over `[-P0, T0]` and the `match != 0` path (`wavefront_compute_endsfree_*`); port C #126
 9. [ ] #7 BiWFA tie-breaking with match < 0
 
 **Per-change validation:**
