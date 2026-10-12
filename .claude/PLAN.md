@@ -221,7 +221,40 @@ src/
 - Rustdoc on all public types/methods
 - `examples/` directory
 - Final `clippy` + `cargo fmt` pass
-- Set up all tracking files (`.claude/PROGRESS.md`, `.claude/FIXED_BUGS.md`, `.claude/PERFORMANCE_LOG.md`)
+- [x] Set up all tracking files (`.claude/PROGRESS.md`, `.claude/FIXED_BUGS.md`, `.claude/PERFORMANCE_LOG.md`) (2026-10-12)
+
+---
+
+### Phase 14: C Parity and Upstream Sync (post-port, started 2026-10-12)
+
+Differential testing (Rust vs C at the port baseline `16969b5b` and at C HEAD)
+found divergences the stock `wfa.utest.sh` doesn't exercise, mostly in
+heuristics. Work items are tracked in HPCBio/wfa2lib-rs issue #10, in this
+order. Port bugs come first, because banded parity can't be checked while the
+banded path crashes.
+
+1. [x] #1 Bound check on the score-indexed component arrays (`d3618de`)
+2. [x] #2 `init_ends` wrapped slice length (`e494181`)
+3. [x] #3 Edit/indel/linear null-input handling + allocation clamp (`06c593c`, fork PR #12)
+4. [x] #4 Affine/affine2p banded termination and parity (cutoff equate, I/D trim, null inputs; fork PR #14)
+5. [ ] #8 CLI gaps: wire up `--wfa-span`, honour the alignment status in output, xdrop/zdrop steps
+6. [ ] #5 X-drop / Z-drop in end-to-end mode
+7. [ ] #6 BiWFA heuristics; banded-adaptive as in C; port C #125
+8. [ ] #9 Ends-free `match == 0` begin-free seeding; port C #126
+9. [ ] #7 BiWFA tie-breaking with match < 0
+
+**Per-change validation:**
+- stock `wfa.utest.sh`;
+- the differential matrix (non-heuristic configs must stay byte-identical to C);
+- banded parity against C `16969b5b` until C #125 is ported;
+- a debug build plus Guard Malloc (macOS) for memory-safety fixes;
+- a regression test that fails on the parent commit;
+- clippy `-D warnings`;
+- a clean benchmark logged in `PERFORMANCE_LOG.md`.
+
+**Upstream:** fixes go to the fork first, then to COMBINE-lab/wfa2lib-rs as
+small PRs. Record which C commit each sync point corresponds to in
+`PROGRESS.md`.
 
 ---
 
@@ -246,3 +279,5 @@ Phase 1 (Foundation)
 ## Verification Strategy
 
 Each phase validates against the C reference outputs in `WFA2-lib/tests/wfa.utest.check/`. The final gate (Phase 11) runs the full `wfa.utest.sh` test suite with our Rust binary. Performance is tracked in `.claude/PERFORMANCE_LOG.md` with git commit references.
+
+Since Phase 14, `wfa.utest.sh` is supplemented by a differential matrix that runs the Rust and C `align_benchmark` over the same inputs. It covers every metric, memory mode and heuristic (banded-static/adaptive, xdrop, zdrop, wfa-adaptive) on `wfa.utest.seq` and a generated 2 kb / 8% error set with long indels, because the stock suite never exercises banded or drop heuristics.
