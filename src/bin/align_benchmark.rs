@@ -286,7 +286,12 @@ fn compute_output_score(
     text_len: i32,
 ) -> i32 {
     if !score_only {
-        // CIGAR mode: compute score from CIGAR using original penalties
+        // CIGAR mode: an empty CIGAR (no alignment, e.g. END_UNREACHABLE) is
+        // reported as -1, as C's `benchmark_print_output` does.
+        if cigar.operations_slice().is_empty() {
+            return -1;
+        }
+        // Compute score from CIGAR using original penalties
         match penalties.distance_metric {
             DistanceMetric::Indel | DistanceMetric::Edit => cigar.score_edit(),
             DistanceMetric::GapLinear => cigar
@@ -359,7 +364,8 @@ fn main() {
             text.len() as i32,
         );
 
-        let cigar_str = if score_only {
+        // C prints "-" for an empty CIGAR (always the case in score-only mode).
+        let cigar_str = if score_only || aligner.cigar().operations_slice().is_empty() {
             "-".to_string()
         } else {
             aligner.cigar().to_string_rle(true)
