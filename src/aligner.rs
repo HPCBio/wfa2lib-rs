@@ -108,6 +108,13 @@ pub type AffineAligner = WavefrontAligner<3>;
 /// Type alias for gap-affine 2-piece distance (M + I1 + D1 + I2 + D2 wavefronts).
 pub type Affine2pAligner = WavefrontAligner<5>;
 
+/// True if a component slot holds no wavefront or one trimmed to empty
+/// (C's `wavefront->null`).
+#[inline(always)]
+fn is_null_wf(ptr: *mut crate::wavefront::Wavefront) -> bool {
+    ptr.is_null() || unsafe { (*ptr).null }
+}
+
 impl<const N: usize> WavefrontAligner<N> {
     /// Create a new aligner with the given penalties.
     pub fn new(penalties: WavefrontPenalties) -> Self {
@@ -729,11 +736,26 @@ impl<const N: usize> WavefrontAligner<N> {
         let score_curr = score as usize;
 
         let prev_ptr = self.wf_components.get_m_ptr(score_prev);
+        // A missing or trimmed-empty previous wavefront yields a null output, so
+        // the extend step counts null steps toward END_UNREACHABLE. (C computes
+        // from it anyway and never terminates; here the range would drift by one
+        // diagonal per step past the allocation.)
+        if is_null_wf(prev_ptr) {
+            self.set_null_output_m(score_curr);
+            return;
+        }
         // Get prev wavefront dimensions
         let (prev_lo, prev_hi) = unsafe { ((*prev_ptr).lo, (*prev_ptr).hi) };
 
-        let lo = prev_lo - 1;
-        let hi = prev_hi + 1;
+        // Clamp lo/hi to leave room for kernel's k±1 reads within allocated range.
+        let hist_lo = self.wf_components.historic_min_lo;
+        let hist_hi = self.wf_components.historic_max_hi;
+        let lo = (prev_lo - 1).max(hist_lo + 1);
+        let hi = (prev_hi + 1).min(hist_hi - 1);
+        if lo > hi {
+            self.set_null_output_m(score_curr);
+            return;
+        }
 
         // Initialize ends on previous wavefront (like C's wavefront_compute_init_ends)
         // Edit kernel reads prev[k-1], prev[k], prev[k+1] for k in [lo, hi]
@@ -744,8 +766,6 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         // Allocate or reuse output wavefront
-        let hist_lo = self.wf_components.historic_min_lo;
-        let hist_hi = self.wf_components.historic_max_hi;
         let curr_ptr = if self.wf_components.memory_modular {
             let old = self.wf_components.get_m_ptr(score_curr);
             if !old.is_null() {
@@ -819,12 +839,23 @@ impl<const N: usize> WavefrontAligner<N> {
             (0, -1) // empty range
         };
 
-        // Union of ranges (gap expands by ±1 for ins/del k-shifts)
-        let lo = misms_lo.min(gap_lo - 1);
-        let hi = misms_hi.max(gap_hi + 1);
+        // All inputs missing or trimmed-empty: null output (C's
+        // `wavefront_compute_allocate_output_null`), counted as a null step by
+        // extend. Computing from them would widen the range every step.
+        if is_null_wf(misms_ptr) && is_null_wf(gap_ptr) {
+            self.set_null_output_m(score_curr);
+            return;
+        }
+
+        // Union of ranges (gap expands by ±1 for ins/del k-shifts), clamped to
+        // leave room for the kernel's k±1 reads within the allocated range.
+        let hist_lo = self.wf_components.historic_min_lo;
+        let hist_hi = self.wf_components.historic_max_hi;
+        let lo = misms_lo.min(gap_lo - 1).max(hist_lo + 1);
+        let hi = misms_hi.max(gap_hi + 1).min(hist_hi - 1);
 
         if lo > hi {
-            // No valid inputs
+            self.set_null_output_m(score_curr);
             return;
         }
 
@@ -848,8 +879,6 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         // Allocate or reuse output wavefront
-        let hist_lo = self.wf_components.historic_min_lo;
-        let hist_hi = self.wf_components.historic_max_hi;
         let curr_ptr = if self.wf_components.memory_modular {
             let old = self.wf_components.get_m_ptr(score_curr);
             if !old.is_null() {
@@ -1934,6 +1963,18 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
+    /// Store a null M-wavefront at `score` (edit/indel/linear), releasing any
+    /// modular-slot wavefront it replaces.
+    #[inline(always)]
+    fn set_null_output_m(&mut self, score: usize) {
+        let slot = self.wf_components.slot_of(score);
+        if self.wf_components.memory_modular {
+            self.wavefront_slab
+                .free_ptr(self.wf_components.get_m_ptr_slot(slot));
+        }
+        self.wf_components.set_m_ptr_slot(slot, WF_PTR_NONE);
+    }
+
     /// Free old wavefronts at the modular slot for affine (M, I1, D1).
     #[inline(always)]
     fn free_output_wavefronts_affine(&mut self, slot: usize) {
@@ -2170,6 +2211,54 @@ mod tests {
         });
         linear.align_end2end(&pattern, &text);
         assert_ne!(linear.status(), AlignStatus::Completed);
+    }
+
+    #[test]
+    fn test_banded_unreachable_edit_linear_end_unreachable() {
+        // Once the band and trimming empty the wavefront, edit/indel/linear must
+        // emit null wavefronts (C's null-input check) so extend reports
+        // END_UNREACHABLE. Previously they kept computing from the empty
+        // wavefront, widening lo/hi each step past the allocated range and,
+        // in score-only mode, never terminating. The step cap turns a
+        // regression into a failure instead of a hang.
+        let (pattern, text) = band_excludes_target();
+        let penalties = [
+            WavefrontPenalties::new_edit(),
+            WavefrontPenalties::new_indel(),
+            WavefrontPenalties::new_linear(crate::penalties::LinearPenalties {
+                match_: 0,
+                mismatch: 4,
+                indel: 2,
+            }),
+        ];
+        for p in penalties {
+            for scope in [
+                AlignmentScope::ComputeAlignment,
+                AlignmentScope::ComputeScore,
+            ] {
+                let mut aligner = EditAligner::new(p.clone());
+                aligner.alignment_scope = scope;
+                aligner.set_max_alignment_steps(10_000);
+                aligner.set_heuristic(HeuristicStrategy::BandedStatic {
+                    min_k: -5,
+                    max_k: 5,
+                });
+                aligner.align_end2end(&pattern, &text);
+                assert_eq!(
+                    aligner.status(),
+                    AlignStatus::EndUnreachable,
+                    "{:?} {:?}",
+                    p.distance_metric,
+                    scope
+                );
+
+                // The aligner must still produce correct results afterwards.
+                aligner.set_heuristic(HeuristicStrategy::None);
+                aligner.alignment_scope = AlignmentScope::ComputeAlignment;
+                aligner.align_end2end(b"ACGTACGT", b"ACGAACGT");
+                assert_eq!(aligner.status(), AlignStatus::Completed);
+            }
+        }
     }
 
     // --- Gap-linear tests ---
