@@ -666,6 +666,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let distances = self.wf_components.wavefront_victim.offsets_slice_mut();
 
         let wf = unsafe { &mut *m_ptr };
+        let (lo_base, hi_base) = (wf.lo, wf.hi);
         let zdropped = heuristic::heuristic_cutoff(
             &self.heuristic,
             &mut self.heuristic_state,
@@ -679,6 +680,17 @@ impl<const N: usize> WavefrontAligner<N> {
 
         if zdropped {
             return true;
+        }
+
+        // As C's `wavefront_heuristic_cufoff`: an empty M is left alone, and I/D
+        // are only equated when the cutoff actually narrowed M. (Equating
+        // unconditionally empties I/D whenever M is empty, ending alignments
+        // that C completes through the I/D wavefronts.)
+        if lo_base > hi_base || (wf.lo == lo_base && wf.hi == hi_base) {
+            return false;
+        }
+        if wf.lo > wf.hi {
+            wf.null = true;
         }
 
         // Propagate narrowed M-wavefront bounds to I/D wavefronts
