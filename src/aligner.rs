@@ -2151,6 +2151,27 @@ mod tests {
         assert_ne!(affine2p.status(), AlignStatus::Completed);
     }
 
+    #[test]
+    fn test_banded_linear_init_ends_empty_range() {
+        // Band cutoffs leave lo below the requested init range; the init_ends
+        // fill must then be a no-op rather than a wrapped slice length.
+        let (pattern, text) = band_excludes_target();
+        let mut linear = EditAligner::new(WavefrontPenalties::new_linear(
+            crate::penalties::LinearPenalties {
+                match_: 0,
+                mismatch: 4,
+                indel: 2,
+            },
+        ));
+        linear.alignment_scope = AlignmentScope::ComputeAlignment;
+        linear.set_heuristic(HeuristicStrategy::BandedStatic {
+            min_k: -5,
+            max_k: 5,
+        });
+        linear.align_end2end(&pattern, &text);
+        assert_ne!(linear.status(), AlignStatus::Completed);
+    }
+
     // --- Gap-linear tests ---
 
     #[test]
