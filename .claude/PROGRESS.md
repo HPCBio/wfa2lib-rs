@@ -28,7 +28,7 @@ sync" below.
 |---|---|
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
 | Stock `wfa.utest.sh` | 57/60 identical; 3 are BiWFA CIGAR tie-breaks with match < 0 (#7) |
-| banded-static (affine, affine2p, linear) | Identical to C `16969b5b` once #3 and #4 are merged |
+| banded-static (affine, affine2p, linear) | Identical to C `16969b5b` (unreachable pairs print `0` instead of `-1  -` in alignment mode, #8) |
 | banded-static (edit) | Rust stops as unreachable; C never terminates (C bug) |
 | banded-adaptive | Differs: Rust applies the static clamp every N steps instead of C's re-centred band (#6) |
 | xdrop / zdrop | Not applied in end-to-end mode (#5) |
@@ -50,7 +50,7 @@ C changes after the port baseline that affect behaviour (fork issue #10):
 ### Upstream Rust (COMBINE-lab/wfa2lib-rs) PRs
 
 - COMBINE-lab #6: bugs 1–2 (bounds check, `init_ends`). Open.
-- Planned: bugs 3–4 combined into one PR.
+- Planned: bugs 3–4 combined into one PR (fork #12 + #14).
 
 ## Log
 
@@ -61,6 +61,6 @@ C changes after the port baseline that affect behaviour (fork issue #10):
   - Identified the port baseline (above).
   - Built the differential test harness (Rust vs C HEAD vs C baseline, 28
     configs × 5 modes × 2 datasets) and filed fork issues #1–#10.
-  - Fixed bugs 1–2 (fork PR #11, merged; COMBINE-lab #6), bug 3 (fork PR #12)
-    and bug 4 (branch `fix/affine-banded-termination`).
+  - Fixed bugs 1–2 (fork PR #11; COMBINE-lab #6), bug 3 (fork PR #12) and
+    bug 4 (fork PR #14), all merged into the fork's `main`.
   - Added these tracking files.

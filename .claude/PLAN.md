@@ -235,8 +235,8 @@ banded path crashes.
 
 1. [x] #1 Bound check on the score-indexed component arrays (`d3618de`)
 2. [x] #2 `init_ends` wrapped slice length (`e494181`)
-3. [ ] #3 Edit/indel/linear null-input handling + allocation clamp (fork PR #12)
-4. [ ] #4 Affine/affine2p banded termination and parity (cutoff equate, I/D trim, null inputs)
+3. [x] #3 Edit/indel/linear null-input handling + allocation clamp (`06c593c`, fork PR #12)
+4. [x] #4 Affine/affine2p banded termination and parity (cutoff equate, I/D trim, null inputs; fork PR #14)
 5. [ ] #8 CLI gaps: wire up `--wfa-span`, honour the alignment status in output, xdrop/zdrop steps
 6. [ ] #5 X-drop / Z-drop in end-to-end mode
 7. [ ] #6 BiWFA heuristics; banded-adaptive as in C; port C #125

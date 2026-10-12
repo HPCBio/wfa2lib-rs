@@ -13,8 +13,8 @@ COMBINE-lab.
 |---|---|---|---|
 | 1 | Out-of-bounds write past score-indexed component arrays | d235d45 | Fixed: `d3618de` (fork PR #11, merged); upstream COMBINE-lab #6 (open) |
 | 2 | `init_ends_{lower,higher}` negative length wraps to a huge slice | 4d99296 | Fixed: `e494181` (fork PR #11, merged); upstream COMBINE-lab #6 (open) |
-| 3 | Edit/indel/linear kernels overrun the wavefront allocation | original port | Fix in fork PR #12 (open) |
-| 4 | Unreachable banded alignments never terminate; affine banded output differs from C | 2c112b2, 35bfcde + original port | Fix on branch `fix/affine-banded-termination` (PR pending) |
+| 3 | Edit/indel/linear kernels overrun the wavefront allocation | original port | Fixed: `06c593c` (fork PR #12, merged `12ba05b`) |
+| 4 | Unreachable banded alignments never terminate; affine banded output differs from C | 2c112b2, 35bfcde + original port | Fixed: `320611d`, `ddae4d8`, `29a9c89` (fork PR #14, merged `59db5a4`) |
 
 All four were found by differential testing against C (fork issue #10): the
 Rust and C `align_benchmark` binaries run over the same configuration matrix,
@@ -76,7 +76,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   they store a NULL output and count a null step, and extend reports
   `END_UNREACHABLE` after `max_score_scope` such steps. (C's edit step lacks
   the check and never terminates: a C bug, still to be reported upstream.)
-- **Fix (`06c593c`, fork PR #12):**
+- **Fix (`06c593c`, fork PR #12, merged):**
   - null output when every input is null;
   - edit/linear `lo/hi` clamped to the historic range minus the kernel's k±1
     margin, as affine already does;
@@ -106,7 +106,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
 - **How it was found:** per-score traces of M/I/D `lo/hi/null` and the null-step
   count, from Rust and from an instrumented copy of C, on utest pair 202. The
   traces first diverge at s = 980 (M = [-11,-5] in Rust vs [-11,0] in C).
-- **Fix (branch `fix/affine-banded-termination`):** `320611d` (cutoff equate),
+- **Fix (fork PR #14, merged):** `320611d` (cutoff equate),
   `ddae4d8` (I/D trim), `29a9c89` (null inputs).
 - **Result:** banded-static output for affine, affine2p and gap-linear matches
   C `16969b5b` exactly on `wfa.utest.seq` and a 300 × 2 kb / 8% set (bands
