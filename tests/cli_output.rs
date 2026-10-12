@@ -8,6 +8,11 @@ use std::process::Command;
 
 /// Run `align_benchmark` on `pairs` with `args`; return the output lines.
 fn run(name: &str, pairs: &[(&str, &str)], args: &[&str]) -> Vec<String> {
+    run_status(name, pairs, args).expect("align_benchmark failed")
+}
+
+/// Like `run`, but return `None` if `align_benchmark` exits unsuccessfully.
+fn run_status(name: &str, pairs: &[(&str, &str)], args: &[&str]) -> Option<Vec<String>> {
     let dir = std::env::temp_dir();
     let input: PathBuf = dir.join(format!("wfa2_cli_{name}_{}.seq", std::process::id()));
     let output: PathBuf = dir.join(format!("wfa2_cli_{name}_{}.alg", std::process::id()));
@@ -23,13 +28,14 @@ fn run(name: &str, pairs: &[(&str, &str)], args: &[&str]) -> Vec<String> {
         .output()
         .expect("failed to run align_benchmark")
         .status;
-    assert!(status.success(), "align_benchmark exited with {status}");
 
-    let lines = fs::read_to_string(&output)
-        .unwrap()
-        .lines()
-        .map(str::to_string)
-        .collect();
+    let lines = status.success().then(|| {
+        fs::read_to_string(&output)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    });
     let _ = fs::remove_file(&input);
     let _ = fs::remove_file(&output);
     lines
@@ -79,4 +85,71 @@ fn score_only_prints_dash_cigar() {
         &["-a", "gap-affine-wfa", "--wfa-score-only"],
     );
     assert_eq!(lines, ["-4\t-"]);
+}
+
+/// Pairs and `--wfa-span` outputs below are from C WFA2-lib's `align_benchmark`
+/// (16969b5b and 3282f83 agree) with `-a gap-affine-wfa`.
+const SPAN_PAIRS: [(&str, &str); 2] = [
+    ("ACGTACGTACGTTTTTTTTT", "ACGTACGTACGTGGGGGGGG"),
+    ("ACGTACGTAC", "ACGTACGTACGGAAA"),
+];
+
+fn span(name: &str, span: &str, score_only: bool) -> Vec<String> {
+    let span_arg = format!("--wfa-span={span}");
+    let mut args = vec!["-a", "gap-affine-wfa", span_arg.as_str()];
+    if score_only {
+        args.push("--wfa-score-only");
+    }
+    run(name, &SPAN_PAIRS, &args)
+}
+
+#[test]
+fn wfa_span_matches_c() {
+    // Previously `--wfa-span` was parsed but ignored (always global).
+    assert_eq!(span("ext", "extension", false), ["0\t12M", "0\t10M"]);
+    assert_eq!(span("ext_s", "extension", true), ["-22\t-", "0\t-"]);
+    // Text end free: absolute count (5) and fraction of |T| (0.5).
+    assert_eq!(
+        span("ef_abs", "ends-free,0,0,0,5", false),
+        ["-44\t12M5D3X5I", "-16\t10M5I"]
+    );
+    assert_eq!(
+        span("ef_abs_s", "ends-free,0,0,0,5", true),
+        ["-28\t-", "0\t-"]
+    );
+    assert_eq!(
+        span("ef_frac", "ends-free,0,0,0,0.5", false),
+        ["-44\t12M8D8I", "-16\t10M5I"]
+    );
+    assert_eq!(
+        span("ef_frac_s", "ends-free,0,0,0,0.5", true),
+        ["-22\t-", "0\t-"]
+    );
+    assert_eq!(
+        span("global", "global", false),
+        ["-32\t12M8X", "-16\t10M5I"]
+    );
+}
+
+#[test]
+fn wfa_span_rejects_what_c_rejects() {
+    // BiWFA does not support ends-free/extension; free ends larger than the
+    // sequences are an error. C's driver exits with status 1 for both.
+    let biwfa = run_status(
+        "biwfa_ext",
+        &SPAN_PAIRS,
+        &[
+            "-a",
+            "gap-affine-wfa",
+            "--wfa-memory=ultralow",
+            "--wfa-span=extension",
+        ],
+    );
+    assert!(biwfa.is_none());
+    let oversize = run_status(
+        "oversize",
+        &SPAN_PAIRS,
+        &["-a", "gap-affine-wfa", "--wfa-span=ends-free,0,0,0,30"],
+    );
+    assert!(oversize.is_none());
 }

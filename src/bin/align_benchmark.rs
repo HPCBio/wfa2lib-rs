@@ -173,6 +173,56 @@ fn build_penalties(cli: &Cli) -> WavefrontPenalties {
     }
 }
 
+/// Alignment span (`--wfa-span`), as in C's `align_benchmark_params.c`.
+enum Span {
+    Global,
+    Extension,
+    /// Free ends P0,Pf,T0,Tf: a value in [0, 1] is a fraction of the sequence
+    /// length, anything else an absolute count (C's `nominal_prop_u32`).
+    EndsFree([f64; 4]),
+}
+
+fn parse_span(arg: Option<&str>) -> Span {
+    let Some(arg) = arg else {
+        return Span::Global;
+    };
+    match arg {
+        "global" => Span::Global,
+        "extension" | "extend" => Span::Extension,
+        _ if arg.starts_with("ends-free") || arg.starts_with("endsfree") => {
+            let v: Vec<f64> = arg
+                .split(',')
+                .skip(1)
+                .map(|x| {
+                    x.trim().parse().unwrap_or_else(|_| {
+                        eprintln!("Invalid --wfa-span");
+                        std::process::exit(1);
+                    })
+                })
+                .collect();
+            if v.len() != 4 {
+                eprintln!("Invalid --wfa-span");
+                std::process::exit(1);
+            }
+            Span::EndsFree([v[0], v[1], v[2], v[3]])
+        }
+        _ => {
+            eprintln!("Option '--wfa-span' must be in {{'global','extension','ends-free'}}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// C's `nominal_prop_u32`: `base * factor` for a factor in [0, 1], else the
+/// factor itself (truncated).
+fn nominal_prop(base: usize, factor: f64) -> i32 {
+    if (0.0..=1.0).contains(&factor) {
+        (base as f64 * factor) as u32 as i32
+    } else {
+        factor as u32 as i32
+    }
+}
+
 fn parse_heuristic(name: &str, params: Option<&str>) -> HeuristicStrategy {
     let p: Vec<i32> = if let Some(params) = params {
         params
@@ -231,6 +281,30 @@ impl AnyAligner {
             AnyAligner::N1(a) => a.align_biwfa(pattern, text),
             AnyAligner::N3(a) => a.align_biwfa(pattern, text),
             AnyAligner::N5(a) => a.align_biwfa(pattern, text),
+        }
+    }
+
+    fn align_endsfree(&mut self, pattern: &[u8], text: &[u8]) -> i32 {
+        match self {
+            AnyAligner::N1(a) => a.align_endsfree(pattern, text),
+            AnyAligner::N3(a) => a.align_endsfree(pattern, text),
+            AnyAligner::N5(a) => a.align_endsfree(pattern, text),
+        }
+    }
+
+    fn set_alignment_free_ends(&mut self, p0: i32, pf: i32, t0: i32, tf: i32) {
+        match self {
+            AnyAligner::N1(a) => a.set_alignment_free_ends(p0, pf, t0, tf),
+            AnyAligner::N3(a) => a.set_alignment_free_ends(p0, pf, t0, tf),
+            AnyAligner::N5(a) => a.set_alignment_free_ends(p0, pf, t0, tf),
+        }
+    }
+
+    fn set_alignment_extension(&mut self) {
+        match self {
+            AnyAligner::N1(a) => a.set_alignment_extension(),
+            AnyAligner::N3(a) => a.set_alignment_extension(),
+            AnyAligner::N5(a) => a.set_alignment_extension(),
         }
     }
 
@@ -340,6 +414,16 @@ fn main() {
         aligner.set_max_alignment_steps(max_steps);
     }
 
+    let span = parse_span(cli.wfa_span.as_deref());
+    if use_biwfa && !matches!(span, Span::Global) {
+        // C rejects both combinations in `wavefront_align_presets__checks`.
+        eprintln!("[WFA] BiWFA ends-free and extension are not supported");
+        std::process::exit(1);
+    }
+    if matches!(span, Span::Extension) {
+        aligner.set_alignment_extension();
+    }
+
     let mut output_lines: Vec<String> = Vec::with_capacity(pairs.len());
     let mut correct_count = 0u32;
     let total = pairs.len() as u32;
@@ -348,10 +432,34 @@ fn main() {
 
     for (pattern, text) in &pairs {
         let t0 = std::time::Instant::now();
-        let wfa_score = if use_biwfa && !score_only {
-            aligner.align_biwfa(pattern, text)
-        } else {
-            aligner.align_end2end(pattern, text)
+        let wfa_score = match span {
+            Span::Global if use_biwfa && !score_only => aligner.align_biwfa(pattern, text),
+            Span::Global => aligner.align_end2end(pattern, text),
+            Span::Extension => aligner.align_endsfree(pattern, text),
+            Span::EndsFree([p0, pf, t0, tf]) => {
+                let (plen, tlen) = (pattern.len(), text.len());
+                let ends = [
+                    nominal_prop(plen, p0),
+                    nominal_prop(plen, pf),
+                    nominal_prop(tlen, t0),
+                    nominal_prop(tlen, tf),
+                ];
+                if ends[0] as usize > plen
+                    || ends[1] as usize > plen
+                    || ends[2] as usize > tlen
+                    || ends[3] as usize > tlen
+                {
+                    eprintln!(
+                        "[WFA] Ends-free parameters must be not larger than the sequences \
+                         (P0={},Pf={},T0={},Tf={}). Must be (P0<=|P|,Pf<=|P|,T0<=|T|,Tf<=|T|) \
+                         where (|P|,|T|)=({plen},{tlen})",
+                        ends[0], ends[1], ends[2], ends[3]
+                    );
+                    std::process::exit(1);
+                }
+                aligner.set_alignment_free_ends(ends[0], ends[1], ends[2], ends[3]);
+                aligner.align_endsfree(pattern, text)
+            }
         };
         align_nanos += t0.elapsed().as_nanos() as u64;
 
