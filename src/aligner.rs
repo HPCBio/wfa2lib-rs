@@ -1077,19 +1077,12 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.set_i1_ptr_slot(out_slot, i1_curr_ptr);
         self.wf_components.set_d1_ptr_slot(out_slot, d1_curr_ptr);
 
-        // Trim M wavefront, then clamp I/D lo/hi to M's trimmed range.
-        // This prevents untrimmed I/D wavefronts from widening the next step's range.
+        // Trim all output wavefronts independently, as C's `process_ends` does.
+        // I/D may keep valid diagonals outside M's trimmed range.
         unsafe {
             compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
-            if (*m_curr_ptr).null {
-                self.num_null_steps = i32::MAX;
-            }
-            let m_lo = (*m_curr_ptr).lo;
-            let m_hi = (*m_curr_ptr).hi;
-            if (*i1_curr_ptr).lo < m_lo { (*i1_curr_ptr).lo = m_lo; }
-            if (*i1_curr_ptr).hi > m_hi { (*i1_curr_ptr).hi = m_hi; }
-            if (*d1_curr_ptr).lo < m_lo { (*d1_curr_ptr).lo = m_lo; }
-            if (*d1_curr_ptr).hi > m_hi { (*d1_curr_ptr).hi = m_hi; }
+            compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
+            compute::trim_ends(plen, tlen, &mut *d1_curr_ptr);
         }
     }
 
@@ -1327,27 +1320,17 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.set_d1_ptr_slot(out_slot, d1_curr_ptr);
         self.wf_components.set_d2_ptr_slot(out_slot, if d2_stored { d2_curr_ptr } else { WF_PTR_NONE });
 
-        // Trim M wavefront, then clamp I/D lo/hi to M's trimmed range.
-        // This prevents untrimmed I/D wavefronts from widening the next step's range
-        // without the cost of scanning each I/D wavefront's ends.
+        // Trim all output wavefronts independently, as C's `process_ends` does.
+        // I/D may keep valid diagonals outside M's trimmed range.
         unsafe {
             compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
-            if (*m_curr_ptr).null {
-                self.num_null_steps = i32::MAX;
-            }
-            let m_lo = (*m_curr_ptr).lo;
-            let m_hi = (*m_curr_ptr).hi;
-            if (*i1_curr_ptr).lo < m_lo { (*i1_curr_ptr).lo = m_lo; }
-            if (*i1_curr_ptr).hi > m_hi { (*i1_curr_ptr).hi = m_hi; }
-            if (*d1_curr_ptr).lo < m_lo { (*d1_curr_ptr).lo = m_lo; }
-            if (*d1_curr_ptr).hi > m_hi { (*d1_curr_ptr).hi = m_hi; }
+            compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
+            compute::trim_ends(plen, tlen, &mut *d1_curr_ptr);
             if i2_stored {
-                if (*i2_curr_ptr).lo < m_lo { (*i2_curr_ptr).lo = m_lo; }
-                if (*i2_curr_ptr).hi > m_hi { (*i2_curr_ptr).hi = m_hi; }
+                compute::trim_ends(plen, tlen, &mut *i2_curr_ptr);
             }
             if d2_stored {
-                if (*d2_curr_ptr).lo < m_lo { (*d2_curr_ptr).lo = m_lo; }
-                if (*d2_curr_ptr).hi > m_hi { (*d2_curr_ptr).hi = m_hi; }
+                compute::trim_ends(plen, tlen, &mut *d2_curr_ptr);
             }
         }
     }
