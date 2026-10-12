@@ -28,7 +28,7 @@ sync" below.
 |---|---|
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
 | Stock `wfa.utest.sh` | 57/60 identical; 3 are BiWFA CIGAR tie-breaks with match < 0 (#7) |
-| banded-static (affine, affine2p, linear) | Identical to C `16969b5b` (unreachable pairs print `0` instead of `-1  -` in alignment mode, #8) |
+| banded-static (affine, affine2p, linear) | Byte-identical to C `16969b5b` in high / med / score-only modes, including unreachable pairs |
 | banded-static (edit) | Rust stops as unreachable; C never terminates (C bug) |
 | banded-adaptive | Differs: Rust applies the static clamp every N steps instead of C's re-centred band (#6) |
 | xdrop / zdrop | Not applied in end-to-end mode (#5) |

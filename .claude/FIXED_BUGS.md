@@ -15,6 +15,7 @@ COMBINE-lab.
 | 2 | `init_ends_{lower,higher}` negative length wraps to a huge slice | 4d99296 | Fixed: `e494181` (fork PR #11, merged); upstream COMBINE-lab #6 (open) |
 | 3 | Edit/indel/linear kernels overrun the wavefront allocation | original port | Fixed: `06c593c` (fork PR #12, merged `12ba05b`) |
 | 4 | Unreachable banded alignments never terminate; affine banded output differs from C | 2c112b2, 35bfcde + original port | Fixed: `320611d`, `ddae4d8`, `29a9c89` (fork PR #14, merged `59db5a4`) |
+| 5 | CLI prints `0` and an empty CIGAR field when no alignment is found (C: `-1  -`) | original port (CLI) | Fix on branch `fix/cli-empty-cigar-output` |
 
 All four were found by differential testing against C (fork issue #10): the
 Rust and C `align_benchmark` binaries run over the same configuration matrix,
@@ -114,3 +115,20 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   unreachable pairs.
 - **Tests:** `test_banded_unreachable_affine_end_unreachable`,
   `test_banded_affine_equates_id_only_when_m_narrowed`.
+
+## 5. CLI output when no alignment is found
+
+- **Symptom:** in alignment (CIGAR) mode, `align_benchmark` printed
+  `0<TAB>` (score 0, empty CIGAR field) for pairs with no alignment, e.g.
+  END_UNREACHABLE under a band. C prints `-1<TAB>-`. Because of this, banded
+  output never diffed clean against C, even where the alignments matched.
+- **Root cause:** the CLI always re-scored the CIGAR (an empty CIGAR scores 0)
+  and printed its RLE string (empty).
+- **C:** `benchmark_print_output` uses score `-1` when the CIGAR is empty
+  (`begin_offset >= end_offset`) and prints `-` for an empty CIGAR.
+- **Fix (branch `fix/cli-empty-cigar-output`):** the same rule in
+  `compute_output_score` and the CIGAR column. Banded-static output is now
+  byte-identical to C `16969b5b` in high, med and score-only modes (30/30
+  cells).
+- **Tests:** `tests/cli_output.rs` runs the binary: an empty CIGAR prints
+  `-1  -`, and the completed and score-only formats are unchanged.
