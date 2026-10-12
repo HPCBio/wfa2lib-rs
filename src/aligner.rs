@@ -8,7 +8,7 @@ use crate::compute;
 use crate::compute::{affine, affine2p, edit, linear};
 use crate::extend;
 use crate::heuristic::{self, HeuristicState, HeuristicStrategy};
-use crate::offset::{wavefront_h, wavefront_v};
+use crate::offset::{OFFSET_NULL, wavefront_h, wavefront_v};
 use crate::penalties::{DistanceMetric, WavefrontPenalties};
 use crate::sequences::{SequenceMode, WavefrontSequences};
 use crate::components::WF_PTR_NONE;
@@ -330,9 +330,12 @@ impl<const N: usize> WavefrontAligner<N> {
         // Init sequences
         self.sequences.init_ascii(pattern, text, false);
 
-        // For extension mode, override end_free to full sequence lengths
+        // Extension: no begin gaps, free ends up to the full sequence lengths
+        // (C's `wavefront_align_presets__checks`)
         if self.extension {
+            self.pattern_begin_free = 0;
             self.pattern_end_free = self.sequences.pattern_length;
+            self.text_begin_free = 0;
             self.text_end_free = self.sequences.text_length;
         }
 
@@ -548,6 +551,25 @@ impl<const N: usize> WavefrontAligner<N> {
         unsafe {
             (*wf_ptr).set_offset(0, 0);
             (*wf_ptr).set_limits(0, 0);
+        }
+        // Ends-free with match == 0: the begin-free cells (h,0) and (0,v) are
+        // all reachable at score 0 (C's `wavefront_aligner_init_wf_m`, with
+        // C #126's restriction to ends-free span). For match != 0 they are
+        // added during compute instead (`endsfree_begin_k`).
+        if self.alignment_span == AlignmentSpan::EndsFree && self.penalties.match_ == 0 {
+            let (t0, p0) = (self.text_begin_free, self.pattern_begin_free);
+            unsafe {
+                for h in 1..=t0 {
+                    (*wf_ptr).set_offset(h, h); // k = h, offset = h
+                }
+                for v in 1..=p0 {
+                    (*wf_ptr).set_offset(-v, 0); // k = -v, offset = h = 0
+                }
+                // C sets lo/hi only; the initialized range stays [0, 0]
+                // (widened later by the gap-metric `init_ends`, never by edit).
+                (*wf_ptr).lo = -p0;
+                (*wf_ptr).hi = t0;
+            }
         }
         self.wf_components.set_m_ptr(0, wf_ptr);
     }
@@ -787,12 +809,17 @@ impl<const N: usize> WavefrontAligner<N> {
             return;
         }
 
-        // Initialize ends on previous wavefront (like C's wavefront_compute_init_ends)
-        // Edit kernel reads prev[k-1], prev[k], prev[k+1] for k in [lo, hi]
-        // so prev needs [lo-1, hi+1]
+        // Null the two cells beyond each end of prev that the kernel reads
+        // (prev[k-1], prev[k], prev[k+1] for k in [prev.lo - 1, prev.hi + 1]).
+        // As in C's `wavefront_compute_edit`, these are written directly and
+        // prev's initialized range is left unchanged: the backtrace bounds
+        // checks use it, so widening it would let the backtrace step onto
+        // M0's begin-free diagonals, which C's does not.
         unsafe {
-            (*prev_ptr).init_ends_higher(hi + 1);
-            (*prev_ptr).init_ends_lower(lo - 1);
+            (*prev_ptr).set_offset_if_allocated(prev_lo - 2, OFFSET_NULL);
+            (*prev_ptr).set_offset_if_allocated(prev_lo - 1, OFFSET_NULL);
+            (*prev_ptr).set_offset_if_allocated(prev_hi + 1, OFFSET_NULL);
+            (*prev_ptr).set_offset_if_allocated(prev_hi + 2, OFFSET_NULL);
         }
 
         // Allocate or reuse output wavefront
@@ -2403,6 +2430,46 @@ mod tests {
         assert_eq!(affine2p.status(), AlignStatus::Completed);
         let p2 = penalties.affine2p_penalties.as_ref().unwrap();
         assert_eq!(affine2p.cigar().score_gap_affine2p(p2), -204);
+    }
+
+    /// Pairs whose best ends-free alignment uses begin gaps (P0 = 5, T0 = 3).
+    const BEGIN_FREE_PAIRS: [(&[u8], &[u8]); 3] = [
+        (b"TTTTTACGTACGTACGT", b"ACGTACGTACGT"),
+        (b"ACGTACGTACGT", b"GGGACGTACGTACGT"),
+        (b"ACGTTCGTACGA", b"CCACGTACGTACGA"),
+    ];
+
+    #[test]
+    fn test_endsfree_begin_free_match_zero() {
+        // With match == 0 the begin-free cells are seeded at score 0. Expected
+        // CIGARs and scores are from C WFA2-lib (16969b5b and 3282f83 agree);
+        // previously `*_begin_free` was ignored and the result was global.
+        let expected = [("5D12M", 0), ("3I12M", 0), ("2I4M1X7M", 4)];
+        let mut affine = AffineAligner::new(affine_penalties());
+        affine.alignment_scope = AlignmentScope::ComputeAlignment;
+        for ((pattern, text), (cigar, score)) in BEGIN_FREE_PAIRS.iter().zip(expected) {
+            affine.set_alignment_free_ends(5, 0, 3, 0);
+            assert_eq!(affine.align_endsfree(pattern, text), score);
+            assert_eq!(affine.cigar().to_string_rle(true), cigar);
+            assert!(affine.cigar().check_alignment(pattern, text).is_ok());
+        }
+
+        let mut edit = EditAligner::new(WavefrontPenalties::new_edit());
+        for ((pattern, text), score) in BEGIN_FREE_PAIRS.iter().zip([0, 0, 1]) {
+            edit.set_alignment_free_ends(5, 0, 3, 0);
+            assert_eq!(edit.align_endsfree(pattern, text), score);
+        }
+    }
+
+    #[test]
+    fn test_extension_ignores_begin_free() {
+        // C's extension preset forces P0 = T0 = 0, even if begin gaps were set.
+        let mut a = AffineAligner::new(affine_penalties());
+        a.alignment_scope = AlignmentScope::ComputeAlignment;
+        a.set_alignment_free_ends(5, 0, 3, 0);
+        a.set_alignment_extension();
+        a.align_endsfree(b"TTTTTACGTACGTACGT", b"ACGTACGTACGT");
+        assert!(!a.cigar().to_string_rle(true).starts_with("5D"));
     }
 
     // --- Gap-linear tests ---
