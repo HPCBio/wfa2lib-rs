@@ -32,9 +32,9 @@ sync" below.
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
 | Stock `wfa.utest.sh` | 57/60 identical; 3 are BiWFA CIGAR tie-breaks with match < 0 (HPCBio/wfa2lib-rs#7) |
 | banded-static (affine, affine2p, linear) | Byte-identical to C `16969b5b` in high / med / score-only modes, including unreachable pairs |
-| banded-static (edit) | Rust stops as unreachable; C never terminates (C bug) |
+| banded-static (edit, indel) | Rust stops as unreachable; C never terminates (C bug, HPCBio/wfa2lib-rs#24) |
 | banded-adaptive | Differs: Rust applies the static clamp every N steps instead of C's re-centred band (HPCBio/wfa2lib-rs#6) |
-| xdrop / zdrop | Not applied in end-to-end mode (HPCBio/wfa2lib-rs#5) |
+| xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 3282f83 in high and score-only modes (450/576 matrix cells; the other 126 are `med`, where C uses its piggyback backtrace, HPCBio/wfa2lib-rs#8 / HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#21, HPCBio/wfa2lib-rs#23 |
 | BiWFA + any heuristic | Heuristics ignored in BiWFA sub-aligners (HPCBio/wfa2lib-rs#6) |
 | extension; ends-free with end gaps only | Byte-identical to C (all metrics incl. match < 0, alignment and score-only) |
 | ends-free with begin gaps (P0/T0 > 0) | Byte-identical to C, match == 0 and match < 0, alignment / score-only / med (HPCBio/wfa2lib-rs#9). Note: for edit/indel this includes a C bug that can emit an invalid CIGAR (known issue HPCBio/wfa2lib-rs#18, from C `380eb31b`) |
@@ -56,6 +56,14 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 - HPCBio/wfa2lib-rs#18: edit/indel ends-free with begin gaps can return an invalid CIGAR
   (C regression from `380eb31b`; reported as smarco/WFA2-lib#142 with a
   proposed fix).
+- HPCBio/wfa2lib-rs#21: X-drop with `steps_between_cutoffs > 1` returns invalid
+  CIGARs (C high-memory backtrace over pruned diagonals; C's `med` is valid).
+- HPCBio/wfa2lib-rs#22: Z-drop results differ between C's high-memory and `med`
+  modes (Rust matches high; root cause open).
+- HPCBio/wfa2lib-rs#23: score-only score for unreachable alignments (match < 0)
+  is evaluated at C's unset end position (signed overflow); reproduced.
+- HPCBio/wfa2lib-rs#24: edit/indel + banded-static never terminates in C;
+  Rust deliberately terminates (divergence).
 - smarco/WFA2-lib#102: ends-free with match < 0 can be suboptimal, depending on argument
   order. This showed up in HPCBio/dada2-rs#51. Note that dada2-rs's
   "free leading end-gap not credited" failure mode was the Rust HPCBio/wfa2lib-rs#9 bug,

@@ -7,7 +7,9 @@ use clap::Parser;
 #[cfg(feature = "mimalloc-alloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-use wfa2lib_rs::aligner::{AffineAligner, Affine2pAligner, AlignmentScope, EditAligner};
+use wfa2lib_rs::aligner::{
+    Affine2pAligner, AffineAligner, AlignStatus, AlignmentScope, EditAligner,
+};
 use wfa2lib_rs::cigar::Cigar;
 use wfa2lib_rs::heuristic::HeuristicStrategy;
 use wfa2lib_rs::penalties::{
@@ -239,8 +241,19 @@ fn parse_heuristic(name: &str, params: Option<&str>) -> HeuristicStrategy {
             max_distance_threshold: p[1],
             steps_between_cutoffs: p[2],
         },
-        "xdrop" => HeuristicStrategy::XDrop { xdrop: p[0] },
-        "zdrop" => HeuristicStrategy::ZDrop { zdrop: p[0] },
+        // C requires P1 (drop) and P2 (steps between cutoffs).
+        "xdrop" | "zdrop" if p.len() < 2 => {
+            eprintln!("Invalid --wfa-heuristic-parameters");
+            std::process::exit(1);
+        }
+        "xdrop" => HeuristicStrategy::XDrop {
+            xdrop: p[0],
+            steps_between_cutoffs: p[1],
+        },
+        "zdrop" => HeuristicStrategy::ZDrop {
+            zdrop: p[0],
+            steps_between_cutoffs: p[1],
+        },
         "banded-static" => HeuristicStrategy::BandedStatic {
             min_k: p[0],
             max_k: p[1],
@@ -306,6 +319,20 @@ impl AnyAligner {
             AnyAligner::N3(a) => a.set_alignment_extension(),
             AnyAligner::N5(a) => a.set_alignment_extension(),
         }
+    }
+
+    /// (v, h) at which C's driver evaluates the score-only classic score
+    /// (`wavefront_unialign_terminate`): `None` (meaning (|P|, |T|)) if the end
+    /// was reached, else the end position -- the Z-drop cell, or the unset
+    /// position (k = INT_MAX, offset = OFFSET_NULL), whose v + h wraps to 1.
+    fn unreached_end(&self) -> Option<(i32, i32)> {
+        let (status, pos) = match self {
+            AnyAligner::N1(a) => (a.status(), a.alignment_end_pos),
+            AnyAligner::N3(a) => (a.status(), a.alignment_end_pos),
+            AnyAligner::N5(a) => (a.status(), a.alignment_end_pos),
+        };
+        matches!(status, AlignStatus::Partial | AlignStatus::EndUnreachable)
+            .then(|| (pos.offset.wrapping_sub(pos.k), pos.offset))
     }
 
     fn cigar(&self) -> &Cigar {
@@ -407,6 +434,19 @@ fn main() {
 
     if let Some(ref heuristic) = cli.wfa_heuristic {
         let strategy = parse_heuristic(heuristic, cli.wfa_heuristic_parameters.as_deref());
+        if matches!(
+            strategy,
+            HeuristicStrategy::XDrop { .. } | HeuristicStrategy::ZDrop { .. }
+        ) && matches!(
+            penalties.distance_metric,
+            DistanceMetric::Edit | DistanceMetric::Indel
+        ) {
+            // As C's `wavefront_align_presets__checks`.
+            eprintln!(
+                "[WFA] Heuristics drops are not compatible with 'edit'/'indel' distance metrics"
+            );
+            std::process::exit(1);
+        }
         aligner.set_heuristic(strategy);
     }
 
@@ -463,13 +503,16 @@ fn main() {
         };
         align_nanos += t0.elapsed().as_nanos() as u64;
 
+        let (end_v, end_h) = aligner
+            .unreached_end()
+            .unwrap_or((pattern.len() as i32, text.len() as i32));
         let output_score = compute_output_score(
             aligner.cigar(),
             wfa_score,
             &penalties,
             score_only,
-            pattern.len() as i32,
-            text.len() as i32,
+            end_v,
+            end_h,
         );
 
         // C prints "-" for an empty CIGAR (always the case in score-only mode).

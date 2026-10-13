@@ -124,3 +124,22 @@ No regression from the per-step begin-free check. Edit is about 8% faster,
 plausibly because the edit step now writes C's four boundary NULLs directly
 instead of calling `init_ends`.
 
+### 2026-10-13 — `fix/xdrop-zdrop` vs `3488e33` (main)
+
+Same machine and data, Rust only, minimum of 3 runs (ms). This covers the
+ported affine backtrace, null-step counting in compute, and the
+`2*(plen+tlen)` CIGAR buffer:
+
+| Mode | `3488e33` | branch | Δ |
+|---|---|---|---|
+| Edit score | 202 | 204 | +0.9% |
+| Linear score | 325 | 328 | +1.0% |
+| Affine score | 1907 | 1905 | -0.1% |
+| Affine CIGAR | 2031 | 2046 | +0.7% |
+| BiWFA (ultralow) | 3224 | 3256 | +1.0% |
+| Affine2p score | 7532 | 7522 | -0.1% |
+| Affine2p CIGAR | 7794 | 7952 | +2.0% |
+
+No measurable regression (within ~2%). The largest change, affine2p CIGAR,
+is consistent with the ported backtrace doing all of C's source lookups.
+

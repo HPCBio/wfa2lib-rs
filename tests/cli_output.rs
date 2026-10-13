@@ -183,3 +183,71 @@ fn ends_free_begin_gaps_match_c() {
     );
     assert_eq!(lines, ["36\t-", "36\t-", "28\t-"]);
 }
+
+/// wfa.utest.seq pairs 101 and 103; expected outputs are from C's driver
+/// (3282f83) with `-a gap-affine-wfa`.
+const DROP_PAIRS: [(&str, &str); 2] = [
+    (
+        "CACGATCAGGAAGCTGCATCCTTATCTAGGGTGTGTGATCGACAGCTTGGCTGCTCGTCCCACATATGAGTTGCAAGTAACGAATACGTTTCTACGAACC",
+        "CTAGAATCAGAAGCATGCCTCCTATCCAGGGTGTGTGATCACAGCTCGCTGCTCGTCCCCATAATGAGTTCACAGTACGAATAAATTTCTACAAACC",
+    ),
+    (
+        "TCGCGTCCAACTGAGTCAAGAGATAATGTCGGTAACTCTTCATACCAGCACGTCCAGCGGTAAGCCAAGAAACTCGAGCGTGAGAGGGTCCTCCGGTTTG",
+        "TCGAGTCGCAACTGAGTCAAGAGATTAAGTCGGTAAATCCCTCATACCAGCAGTCTAGCGGTAAGCCAAGAAGCTTGAGCGGGAGAGGGTCCTCCGGTTTG",
+    ),
+];
+
+fn drop(name: &str, heuristic: &str, params: &str, extra: &[&str]) -> Vec<String> {
+    let h = format!("--wfa-heuristic={heuristic}");
+    let p = format!("--wfa-heuristic-parameters={params}");
+    let mut args = vec!["-a", "gap-affine-wfa", h.as_str(), p.as_str()];
+    args.extend_from_slice(extra);
+    run(name, &DROP_PAIRS, &args)
+}
+
+#[test]
+fn xdrop_zdrop_match_c() {
+    // X-drop previously had no effect (output equalled the unbanded alignment).
+    assert_eq!(drop("xd", "xdrop", "20,1", &[]), ["-1\t-", "-1\t-"]);
+    // Z-drop ends at the best-scoring cell: a max-trimmed partial alignment.
+    assert_eq!(
+        drop("zd", "zdrop", "20,1", &[]),
+        ["0\t1M", "-20\t3M1X3M1I17M1X1M1X8M"]
+    );
+    assert_eq!(
+        drop("zd_ext", "zdrop", "20,1", &["--wfa-span=extension"]),
+        ["0\t1M", "-20\t3M1X3M1I17M1X1M1X8M"]
+    );
+    // Score-only with a match reward: C evaluates the classic score at the
+    // end position (the Z-drop cell, or the unset position when unreachable).
+    let m = ["--affine-penalties=-3,5,3,2", "--wfa-score-only"];
+    assert_eq!(drop("xd_s", "xdrop", "20,1", &m), ["163\t-", "213\t-"]);
+    assert_eq!(drop("zd_s", "zdrop", "20,1", &m), ["15\t-", "57\t-"]);
+}
+
+#[test]
+fn drops_reject_what_c_rejects() {
+    // C rejects X-drop/Z-drop with edit/indel, and requires P1,P2.
+    let edit = run_status(
+        "xd_edit",
+        &DROP_PAIRS,
+        &[
+            "-a",
+            "edit-wfa",
+            "--wfa-heuristic=xdrop",
+            "--wfa-heuristic-parameters=20,1",
+        ],
+    );
+    assert!(edit.is_none());
+    let one_param = run_status(
+        "xd_p1",
+        &DROP_PAIRS,
+        &[
+            "-a",
+            "gap-affine-wfa",
+            "--wfa-heuristic=xdrop",
+            "--wfa-heuristic-parameters=20",
+        ],
+    );
+    assert!(one_param.is_none());
+}

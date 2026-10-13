@@ -16,7 +16,8 @@ COMBINE-lab.
 | 3 | Edit/indel/linear kernels overrun the wavefront allocation | original port | Fixed: `06c593c` (HPCBio/wfa2lib-rs#12, merged `12ba05b`) |
 | 4 | Unreachable banded alignments never terminate; affine banded output differs from C | 2c112b2, 35bfcde + original port | Fixed: `320611d`, `ddae4d8`, `29a9c89` (HPCBio/wfa2lib-rs#14, merged `59db5a4`) |
 | 5 | CLI prints `0` and an empty CIGAR field when no alignment is found (C: `-1  -`) | original port (CLI) | Fixed: `5e6ce55` (HPCBio/wfa2lib-rs#15, merged) |
-| 6 | Ends-free begin gaps ignored (output equals global) | original port | Fix on branch `feat/endsfree-begin-gaps` |
+| 6 | Ends-free begin gaps ignored (output equals global) | original port | Fixed: `28cb857`, `6a06d8f` (HPCBio/wfa2lib-rs#17, merged) |
+| 7 | X-drop/Z-drop had no effect; backtrace and null-step counting differed from C | original port | Fix on branch `fix/xdrop-zdrop` |
 
 All four were found by differential testing against C (HPCBio/wfa2lib-rs#10): the
 Rust and C `align_benchmark` binaries run over the same configuration matrix,
@@ -146,7 +147,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
     putting cell (h,0) on k = h and (0,v) on k = -v.
   - `match != 0`: `wavefront_compute_endsfree_{required,limits,init,allocate_null}`
     add cell (d,0) / (0,d) at score d * -match, before the ends are trimmed.
-- **Fix (branch `feat/endsfree-begin-gaps`):** `28cb857` (match == 0) and
+- **Fix (HPCBio/wfa2lib-rs#17, merged):** `28cb857` (match == 0) and
   `6a06d8f` (match != 0). Also C's extension preset (P0 = T0 = 0) and smarco/WFA2-lib#126's
   restriction of the seeding to the ends-free span.
 - **Parity details reproduced:**
@@ -174,3 +175,41 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
 - **Tests:** `test_endsfree_begin_free_match_zero`,
   `test_extension_ignores_begin_free`, and
   `tests/cli_output.rs::ends_free_begin_gaps_match_c`.
+
+## 7. X-drop / Z-drop had no effect; backtrace and null-step counting differed
+
+- **Symptom:** with xdrop/zdrop, end-to-end output equalled the unbanded
+  alignment. After porting the heuristics, three more differences from C
+  surfaced under pruning.
+- **Root causes:**
+  1. *Heuristics.* The SW-score formula differed (C:
+     `(swg_match*(v+h) - s)/2`, `swg_match = -match` or -1 when match == 0).
+     There was no `steps_between_cutoffs`. The first call pruned instead of
+     only recording. X-drop updated the best before pruning. Z-drop never set
+     the end cell, and Z-dropped alignments weren't backtraced as partial
+     alignments.
+  2. *Backtrace.* Rust's affine state M compared the mismatch with the
+     stored I1/D1 cells at score s; C reads every predecessor from its source
+     wavefront. These are equivalent until pruning narrows the computed
+     range.
+  3. *Null steps.* Rust counted them in extend; C counts in compute, including
+     ends-free begin-gap "null" M-wavefronts (so Rust gave up much later with
+     ends-free + match < 0).
+- **C details reproduced:**
+  - Z-drop backtraces from the best cell starting at the *current* score.
+  - The CIGAR buffer is `2*(plen+tlen)`.
+  - The end position starts unset (`k = INT_MAX`, `offset = OFFSET_NULL`).
+  - Score-only output for unreachable pairs is evaluated there, with wrapping
+    (HPCBio/wfa2lib-rs#23).
+  - A negative match run moves the CIGAR write position forward
+    (HPCBio/wfa2lib-rs#21).
+- **CLI:** xdrop/zdrop require P1,P2 and are rejected with edit/indel, as in C.
+- **Fix (branch `fix/xdrop-zdrop`):** `a3a4c4f` (backtrace port), `763ed8a`
+  (null-step counting), `f4eb349` (heuristics, partial alignments, CLI).
+- **Result:** 450/576 X-drop/Z-drop cells byte-identical to C 3282f83 (up
+  from 0); all 126 others are `med` (C piggyback; HPCBio/wfa2lib-rs#8,
+  HPCBio/wfa2lib-rs#22). Everything else is unchanged.
+- **Tests:** `tests/cli_output.rs::{xdrop_zdrop_match_c,
+  drops_reject_what_c_rejects}`, `heuristic::tests::{test_compute_sw_scores_c_formula,
+  test_drop_state_reset_uses_steps}`.
+

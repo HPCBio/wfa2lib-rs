@@ -240,11 +240,11 @@ banded path crashes.
 5. [ ] HPCBio/wfa2lib-rs#8 CLI gaps:
    - [x] print `-1  -` for an empty CIGAR, as C does (no alignment found)
    - [x] wire up `--wfa-span` (ends-free / extension), rejecting what C rejects
-   - [ ] xdrop/zdrop `steps_between_cutoffs` parameter
+   - [x] xdrop/zdrop `steps_between_cutoffs` parameter (with HPCBio/wfa2lib-rs#5)
    - [ ] `--wfa-memory=med|low`
    - [ ] stream input and output (CLI max RSS ~200 MB vs C's 2-10 MB)
    - [ ] document the `./WFA2-lib` checkout needed by the integration tests
-6. [ ] HPCBio/wfa2lib-rs#5 X-drop / Z-drop in end-to-end mode
+6. [x] HPCBio/wfa2lib-rs#5 X-drop / Z-drop: C heuristics, Z-drop partial alignments, ported C affine backtrace, null-step counting in compute (`a3a4c4f`, `763ed8a`, `f4eb349`)
 7. [ ] HPCBio/wfa2lib-rs#6 BiWFA heuristics; banded-adaptive as in C; port smarco/WFA2-lib#125
 8. [x] HPCBio/wfa2lib-rs#9 Ends-free begin-free gaps: `match == 0` initial M seeding over `[-P0, T0]` (`28cb857`) and the `match != 0` path, `wavefront_compute_endsfree_*` (`6a06d8f`); smarco/WFA2-lib#126 semantics
 9. [ ] HPCBio/wfa2lib-rs#7 BiWFA tie-breaking with match < 0
