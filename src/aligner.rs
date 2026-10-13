@@ -108,6 +108,14 @@ pub type AffineAligner = WavefrontAligner<3>;
 /// Type alias for gap-affine 2-piece distance (M + I1 + D1 + I2 + D2 wavefronts).
 pub type Affine2pAligner = WavefrontAligner<5>;
 
+/// Initial sequence lengths the components are sized for, as C's
+/// `wavefront_aligner_new` (`PATTERN_LENGTH_INIT`/`TEXT_LENGTH_INIT`). Arrays
+/// only grow afterwards, so their capacity (the score limit in full-memory
+/// mode) is at least that for 1000 x 1000 -- heuristics can push an
+/// alignment past the bound computed for the actual lengths.
+const PATTERN_LENGTH_INIT: i32 = 1000;
+const TEXT_LENGTH_INIT: i32 = 1000;
+
 /// True if a component slot holds no wavefront or one trimmed to empty
 /// (C's `wavefront->null`).
 #[inline(always)]
@@ -136,7 +144,13 @@ fn null_wf_bounds(ptr: *mut crate::wavefront::Wavefront) -> (i32, i32) {
 impl<const N: usize> WavefrontAligner<N> {
     /// Create a new aligner with the given penalties.
     pub fn new(penalties: WavefrontPenalties) -> Self {
-        let wf_components = WavefrontComponents::<N>::new(10, 10, &penalties, false, false);
+        let wf_components = WavefrontComponents::<N>::new(
+            PATTERN_LENGTH_INIT,
+            TEXT_LENGTH_INIT,
+            &penalties,
+            false,
+            false,
+        );
         let init_wf_length = 10;
 
         Self {
@@ -918,8 +932,9 @@ impl<const N: usize> WavefrontAligner<N> {
         // leave room for the kernel's k±1 reads within the allocated range.
         let hist_lo = self.wf_components.historic_min_lo;
         let hist_hi = self.wf_components.historic_max_hi;
-        let lo = misms_lo.min(gap_lo - 1).max(hist_lo + 1);
-        let hi = misms_hi.max(gap_hi + 1).min(hist_hi - 1);
+        let (lo, hi) = self.clamp_to_band(misms_lo.min(gap_lo - 1), misms_hi.max(gap_hi + 1));
+        let lo = lo.max(hist_lo + 1);
+        let hi = hi.min(hist_hi - 1);
 
         if lo > hi {
             self.set_null_output_m(score_curr);
@@ -1043,8 +1058,10 @@ impl<const N: usize> WavefrontAligner<N> {
         let (open_lo, open_hi) = null_wf_bounds(ptr_m_open);
         let (i1_lo, i1_hi) = null_wf_bounds(ptr_i1_ext);
         let (d1_lo, d1_hi) = null_wf_bounds(ptr_d1_ext);
-        let mut lo = misms_lo.min(open_lo - 1).min(i1_lo + 1).min(d1_lo - 1);
-        let mut hi = misms_hi.max(open_hi + 1).max(i1_hi + 1).max(d1_hi - 1);
+        let (mut lo, mut hi) = self.clamp_to_band(
+            misms_lo.min(open_lo - 1).min(i1_lo + 1).min(d1_lo - 1),
+            misms_hi.max(open_hi + 1).max(i1_hi + 1).max(d1_hi - 1),
+        );
 
         if lo > hi {
             if self.wf_components.memory_modular {
@@ -1260,6 +1277,7 @@ impl<const N: usize> WavefrontAligner<N> {
             .max(i2_hi + 1)
             .max(d1_hi - 1)
             .max(d2_hi - 1);
+        (lo, hi) = self.clamp_to_band(lo, hi);
 
         if lo > hi {
             if self.wf_components.memory_modular {
@@ -2081,6 +2099,20 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
+    /// Clamp a computed diagonal range to the heuristic band, as C's
+    /// `wavefront_compute_limits_heuristic` (smarco/WFA2-lib#125) does for
+    /// banded-static and banded-adaptive in the linear/affine/affine2p steps.
+    #[inline(always)]
+    fn clamp_to_band(&self, lo: i32, hi: i32) -> (i32, i32) {
+        match self.heuristic {
+            HeuristicStrategy::BandedStatic { min_k, max_k }
+            | HeuristicStrategy::BandedAdaptive { min_k, max_k, .. } => {
+                (lo.max(min_k), hi.min(max_k))
+            }
+            _ => (lo, hi),
+        }
+    }
+
     /// C's `wavefront_compute_endsfree_required`: with match < 0, the
     /// begin-free cells (h,0) / (0,v) with h = v = d are reached at score
     /// d * -match. Returns d if `score` is such a score within the free range.
@@ -2513,12 +2545,12 @@ mod tests {
     }
 
     #[test]
-    fn test_banded_affine_equates_id_only_when_m_narrowed() {
-        // End diagonal k = 12 lies outside the [-10, 10] band, yet C WFA2-lib
-        // (16969b5b) completes this pair: the cutoff leaves I/D alone when M is
-        // empty or unchanged, so they can carry the alignment past the band.
-        // Equating I/D to M on every step made Rust give up instead.
-        // (Porting C #125's band clamp, fork issue #6, is expected to change this.)
+    fn test_banded_end_outside_band_is_unreachable() {
+        // End diagonal k = 12 lies outside the [-10, 10] band. C WFA2-lib
+        // 16969b5b still completed this pair (I/D wavefronts carried it past
+        // the band: 210 affine / 204 affine2p); since smarco/WFA2-lib#125
+        // clamps the computed range to the band, C (3282f83) reports it
+        // unreachable, and so must we.
         let pattern = b"GCAAGACGATTAGACTTGATAAATGCAATCATCGACTGTAAACAGACGAGCTGTCCTGGGACACTACTGACCGGATCGACTACCGCGT";
         let text = b"ACAAGACACGCTCAGTGACTTGCGTCACCATCGAGCATCCGTCTTAGCAACAGGGCTGTCTGGGGCTGCCATACGACCCGCTGACCGCACGTACGGGCCT";
         let band = HeuristicStrategy::BandedStatic {
@@ -2529,20 +2561,15 @@ mod tests {
         let mut affine = AffineAligner::new(affine_penalties());
         affine.alignment_scope = AlignmentScope::ComputeAlignment;
         affine.set_heuristic(band.clone());
-        assert_eq!(affine.align_end2end(pattern, text), 210);
-        assert_eq!(affine.status(), AlignStatus::Completed);
-        assert!(affine.cigar().check_alignment(pattern, text).is_ok());
+        affine.align_end2end(pattern, text);
+        assert_eq!(affine.status(), AlignStatus::EndUnreachable);
+        assert!(affine.cigar().operations_slice().is_empty());
 
-        // C reports the CIGAR's score; for this band-escaping path it is lower
-        // than the WFA score at which the end was reached.
-        let penalties = affine2p_penalties();
-        let mut affine2p = Affine2pAligner::new(penalties.clone());
+        let mut affine2p = Affine2pAligner::new(affine2p_penalties());
         affine2p.alignment_scope = AlignmentScope::ComputeAlignment;
         affine2p.set_heuristic(band);
         affine2p.align_end2end(pattern, text);
-        assert_eq!(affine2p.status(), AlignStatus::Completed);
-        let p2 = penalties.affine2p_penalties.as_ref().unwrap();
-        assert_eq!(affine2p.cigar().score_gap_affine2p(p2), -204);
+        assert_eq!(affine2p.status(), AlignStatus::EndUnreachable);
     }
 
     /// Pairs whose best ends-free alignment uses begin gaps (P0 = 5, T0 = 3).
