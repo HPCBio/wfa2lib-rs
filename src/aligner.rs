@@ -599,14 +599,13 @@ impl<const N: usize> WavefrontAligner<N> {
         let m_ptr = self.wf_components.get_m_ptr(score_idx);
 
         if m_ptr.is_null() {
-            self.num_null_steps += 1;
+            // Null steps are counted by the compute steps (as in C).
             if self.num_null_steps > self.wf_components.max_score_scope as i32 {
                 self.status = AlignStatus::EndUnreachable;
                 return true;
             }
             return false;
         }
-        self.num_null_steps = 0;
 
         // Extend matches
         let wf = unsafe { &mut *m_ptr };
@@ -649,14 +648,13 @@ impl<const N: usize> WavefrontAligner<N> {
         let m_ptr = self.wf_components.get_m_ptr(score_idx);
 
         if m_ptr.is_null() {
-            self.num_null_steps += 1;
+            // Null steps are counted by the compute steps (as in C).
             if self.num_null_steps > self.wf_components.max_score_scope as i32 {
                 self.status = AlignStatus::EndUnreachable;
                 return true;
             }
             return false;
         }
-        self.num_null_steps = 0;
 
         // Extend matches with ends-free termination check
         let wf = unsafe { &mut *m_ptr };
@@ -811,9 +809,11 @@ impl<const N: usize> WavefrontAligner<N> {
         // from it anyway and never terminates; here the range would drift by one
         // diagonal per step past the allocation.)
         if is_null_wf(prev_ptr) {
+            self.num_null_steps += 1;
             self.set_null_output_m(score_curr);
             return;
         }
+        self.num_null_steps = 0;
         // Get prev wavefront dimensions
         let (prev_lo, prev_hi) = unsafe { ((*prev_ptr).lo, (*prev_ptr).hi) };
 
@@ -876,9 +876,6 @@ impl<const N: usize> WavefrontAligner<N> {
         {
             let wf_curr = unsafe { &mut *curr_ptr };
             compute::trim_ends(plen, tlen, wf_curr);
-            if wf_curr.null {
-                self.num_null_steps = i32::MAX;
-            }
         }
     }
     /// Compute the next wavefront for gap-linear distance.
@@ -906,6 +903,7 @@ impl<const N: usize> WavefrontAligner<N> {
         // `wavefront_compute_allocate_output_null`), counted as a null step by
         // extend. Computing from them would widen the range every step.
         if is_null_wf(misms_ptr) && is_null_wf(gap_ptr) {
+            self.num_null_steps += 1;
             self.set_null_output_m(score_curr);
             if let Some(k) = self.endsfree_begin_k(score) {
                 let wf = self.endsfree_null_m(k);
@@ -913,6 +911,7 @@ impl<const N: usize> WavefrontAligner<N> {
             }
             return;
         }
+        self.num_null_steps = 0;
 
         // Trimmed-empty inputs are read as the null wavefront, like missing ones,
         // whose bounds (lo = 1, hi = -1) still enter the range union as in C.
@@ -994,9 +993,6 @@ impl<const N: usize> WavefrontAligner<N> {
                 self.endsfree_init(wf_curr, k);
             }
             compute::trim_ends(plen, tlen, wf_curr);
-            if wf_curr.null {
-                self.num_null_steps = i32::MAX;
-            }
         }
     }
 
@@ -1031,6 +1027,7 @@ impl<const N: usize> WavefrontAligner<N> {
             && is_null_wf(ptr_i1_ext)
             && is_null_wf(ptr_d1_ext)
         {
+            self.num_null_steps += 1;
             self.free_output_wavefronts_affine(out_slot);
             if let Some(k) = self.endsfree_begin_k(score) {
                 let wf = self.endsfree_null_m(k);
@@ -1038,6 +1035,7 @@ impl<const N: usize> WavefrontAligner<N> {
             }
             return;
         }
+        self.num_null_steps = 0;
 
         // Trimmed-empty inputs are read as the null wavefront, like missing ones.
         let ptr_m_misms = live_or_none(ptr_m_misms);
@@ -1221,6 +1219,7 @@ impl<const N: usize> WavefrontAligner<N> {
             && is_null_wf(ptr_i2_ext)
             && is_null_wf(ptr_d2_ext)
         {
+            self.num_null_steps += 1;
             self.free_output_wavefronts_affine2p(out_slot);
             if let Some(k) = self.endsfree_begin_k(score) {
                 let wf = self.endsfree_null_m(k);
@@ -1228,6 +1227,7 @@ impl<const N: usize> WavefrontAligner<N> {
             }
             return;
         }
+        self.num_null_steps = 0;
 
         // Trimmed-empty inputs are read as the null wavefront, like missing ones.
         let ptr_m_misms = live_or_none(ptr_m_misms);
