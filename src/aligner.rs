@@ -187,6 +187,24 @@ impl<const N: usize> WavefrontAligner<N> {
     }
 
     /// Configure ends-free alignment with the given free-gap parameters.
+    ///
+    /// Up to `pattern_begin_free` / `text_begin_free` leading and
+    /// `pattern_end_free` / `text_end_free` trailing bases of each sequence
+    /// may be left unaligned at no cost. Use [`Self::align_endsfree`].
+    ///
+    /// # Known issues (parity with C WFA2-lib)
+    ///
+    /// Output is identical to C WFA2-lib, including these upstream issues:
+    ///
+    /// - **Edit/indel with begin gaps** (`*_begin_free > 0`) can return an
+    ///   invalid CIGAR: a mismatching column reported as `M`. The score is
+    ///   correct, and gap-linear/affine/affine2p are unaffected. Use
+    ///   [`crate::cigar::Cigar::check_alignment`] if this matters. This is a
+    ///   regression in C WFA2-lib (from commit `380eb31b`); tracked in
+    ///   <https://github.com/HPCBio/wfa2lib-rs/issues/18>.
+    /// - **With a match reward** (`match < 0`), the chosen ends-free alignment
+    ///   can be suboptimal, depending on argument order:
+    ///   <https://github.com/smarco/WFA2-lib/issues/102>.
     pub fn set_alignment_free_ends(
         &mut self,
         pattern_begin_free: i32,
@@ -321,9 +339,9 @@ impl<const N: usize> WavefrontAligner<N> {
 
     /// Align two sequences with ends-free (semi-global) alignment.
     ///
-    /// Ends-free alignment allows free gaps at the ends of sequences, controlled by
-    /// the `pattern_end_free` and `text_end_free` parameters (set via
-    /// `set_alignment_free_ends` or `set_alignment_extension`).
+    /// Ends-free alignment allows free gaps at the beginning and end of each
+    /// sequence, as set by [`Self::set_alignment_free_ends`] (see its known
+    /// issues) or [`Self::set_alignment_extension`].
     ///
     /// For extension mode, the CIGAR is trimmed to the maximal-scoring prefix.
     pub fn align_endsfree(&mut self, pattern: &[u8], text: &[u8]) -> i32 {

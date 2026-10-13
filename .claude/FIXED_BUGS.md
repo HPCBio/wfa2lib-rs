@@ -160,7 +160,14 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
     T0 = 3 → `2I12M`).
   - Scores are correct. Gap metrics are unaffected, because their
     `init_ends` widens the initialized range.
-  - Rust reproduces this for output identity. **To be reported upstream to C.**
+  - It's a C regression from `380eb31b` (backtrace bounds checks moved
+    from `lo/hi` to the initialized range). C at `380eb31b^` gives valid
+    CIGARs.
+  - Rust reproduces it for output identity, documented on
+    `set_alignment_free_ends`. **Known issue HPCBio/wfa2lib-rs#18.**
+  - Upstream report drafted, with a reproducer and a verified one-line fix:
+    set `wf_elements_init_min/max = lo/hi` on M0 in
+    `wavefront_aligner_init_wf_m`.
 - **Result:** ends-free (begin and/or end gaps) and extension are
   byte-identical to C for all metrics, match == 0 and match < 0, in
   alignment, score-only and med modes.
