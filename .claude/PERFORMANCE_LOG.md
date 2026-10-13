@@ -70,9 +70,9 @@ regenerated with C `3282f83`'s `generate_dataset`. Timing as in `bench/run.sh`
 The machine was otherwise idle apart from an endpoint-backup agent (~0.5 core).
 Within each mode, C and all three commits ran back to back.
 
-### 2026-10-12 — `6d284c8` (main, #1/#2), `06c593c` (#3), `29a9c89` (#4)
+### 2026-10-12 — `6d284c8` (main, HPCBio/wfa2lib-rs#1 and HPCBio/wfa2lib-rs#2), `06c593c` (HPCBio/wfa2lib-rs#3), `29a9c89` (HPCBio/wfa2lib-rs#4)
 
-| Mode | C (ms) | `6d284c8` | `06c593c` | `29a9c89` | #4 vs #3 |
+| Mode | C (ms) | `6d284c8` | `06c593c` | `29a9c89` | 29a9c89 vs 06c593c |
 |---|---|---|---|---|---|
 | Edit score | 403 | 223 (0.55x) | 223 (0.55x) | 228 (0.57x) | +2.0% (noise) |
 | Linear score | 555 | 369 (0.66x) | 328 (0.59x) | 323 (0.58x) | -1.3% |
@@ -82,15 +82,15 @@ Within each mode, C and all three commits ran back to back.
 | Affine2p score | 8430 | 6975 (0.83x) | 6919 (0.82x) | 7580 (0.90x) | +9.6% |
 | Affine2p CIGAR | 8910 | 7433 (0.83x) | 7462 (0.84x) | 7899 (0.89x) | +5.9% |
 
-- **#3 (`06c593c`):** no regression.
-- **#4 (`29a9c89`):** costs 3–10% on affine/affine2p. Rust is still faster than
+- **`06c593c` (HPCBio/wfa2lib-rs#3):** no regression.
+- **`29a9c89` (HPCBio/wfa2lib-rs#4):** costs 3–10% on affine/affine2p. Rust is still faster than
   C in every mode.
 
-**Where #4's cost comes from** (minimum of 3 runs, the two most affected modes):
+**Where `29a9c89`'s cost comes from** (minimum of 3 runs, the two most affected modes):
 
 | Commit | Affine2p score | Affine CIGAR |
 |---|---|---|
-| `06c593c` (before #4) | 7016 | 1969 |
+| `06c593c` (before `29a9c89`) | 7016 | 1969 |
 | `320611d` cutoff equates I/D only when M narrowed | 6993 (±0%) | 1973 (±0%) |
 | `ddae4d8` I/D `trim_ends` restored | 7388 (+5.3%) | 2022 (+2.7%) |
 | `29a9c89` null-input handling | 7419 (+0.4%) | 2041 (+1.0%) |
@@ -108,7 +108,7 @@ buffers all output lines, while C streams. It fails PLAN's "memory within 1.5x"
 target as measured. Tracked as a CLI gap (HPCBio/wfa2lib-rs#8). Library-level
 memory should be measured separately, without CLI buffering.
 
-### 2026-10-12 — `6a06d8f` (#9 ends-free begin gaps) vs `eee854b` (main)
+### 2026-10-12 — `6a06d8f` (HPCBio/wfa2lib-rs#9 ends-free begin gaps) vs `eee854b` (main)
 
 End-to-end, same machine and data, Rust only (minimum of 3 runs, ms):
 

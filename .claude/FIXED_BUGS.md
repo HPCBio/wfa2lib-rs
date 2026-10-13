@@ -11,14 +11,14 @@ COMBINE-lab.
 
 | # | Bug | Introduced | Status |
 |---|---|---|---|
-| 1 | Out-of-bounds write past score-indexed component arrays | d235d45 | Fixed: `d3618de` (fork PR #11, merged); upstream COMBINE-lab #6 (open) |
-| 2 | `init_ends_{lower,higher}` negative length wraps to a huge slice | 4d99296 | Fixed: `e494181` (fork PR #11, merged); upstream COMBINE-lab #6 (open) |
-| 3 | Edit/indel/linear kernels overrun the wavefront allocation | original port | Fixed: `06c593c` (fork PR #12, merged `12ba05b`) |
-| 4 | Unreachable banded alignments never terminate; affine banded output differs from C | 2c112b2, 35bfcde + original port | Fixed: `320611d`, `ddae4d8`, `29a9c89` (fork PR #14, merged `59db5a4`) |
-| 5 | CLI prints `0` and an empty CIGAR field when no alignment is found (C: `-1  -`) | original port (CLI) | Fixed: `5e6ce55` (fork PR #15, merged) |
+| 1 | Out-of-bounds write past score-indexed component arrays | d235d45 | Fixed: `d3618de` (HPCBio/wfa2lib-rs#11, merged); upstream COMBINE-lab/wfa2lib-rs#6 (open) |
+| 2 | `init_ends_{lower,higher}` negative length wraps to a huge slice | 4d99296 | Fixed: `e494181` (HPCBio/wfa2lib-rs#11, merged); upstream COMBINE-lab/wfa2lib-rs#6 (open) |
+| 3 | Edit/indel/linear kernels overrun the wavefront allocation | original port | Fixed: `06c593c` (HPCBio/wfa2lib-rs#12, merged `12ba05b`) |
+| 4 | Unreachable banded alignments never terminate; affine banded output differs from C | 2c112b2, 35bfcde + original port | Fixed: `320611d`, `ddae4d8`, `29a9c89` (HPCBio/wfa2lib-rs#14, merged `59db5a4`) |
+| 5 | CLI prints `0` and an empty CIGAR field when no alignment is found (C: `-1  -`) | original port (CLI) | Fixed: `5e6ce55` (HPCBio/wfa2lib-rs#15, merged) |
 | 6 | Ends-free begin gaps ignored (output equals global) | original port | Fix on branch `feat/endsfree-begin-gaps` |
 
-All four were found by differential testing against C (fork issue #10): the
+All four were found by differential testing against C (HPCBio/wfa2lib-rs#10): the
 Rust and C `align_benchmark` binaries run over the same configuration matrix,
 which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
 
@@ -78,7 +78,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   they store a NULL output and count a null step, and extend reports
   `END_UNREACHABLE` after `max_score_scope` such steps. (C's edit step lacks
   the check and never terminates: a C bug, still to be reported upstream.)
-- **Fix (`06c593c`, fork PR #12, merged):**
+- **Fix (`06c593c`, HPCBio/wfa2lib-rs#12, merged):**
   - null output when every input is null;
   - edit/linear `lo/hi` clamped to the historic range minus the kernel's k±1
     margin, as affine already does;
@@ -108,7 +108,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
 - **How it was found:** per-score traces of M/I/D `lo/hi/null` and the null-step
   count, from Rust and from an instrumented copy of C, on utest pair 202. The
   traces first diverge at s = 980 (M = [-11,-5] in Rust vs [-11,0] in C).
-- **Fix (fork PR #14, merged):** `320611d` (cutoff equate),
+- **Fix (HPCBio/wfa2lib-rs#14, merged):** `320611d` (cutoff equate),
   `ddae4d8` (I/D trim), `29a9c89` (null inputs).
 - **Result:** banded-static output for affine, affine2p and gap-linear matches
   C `16969b5b` exactly on `wfa.utest.seq` and a 300 × 2 kb / 8% set (bands
@@ -127,7 +127,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   and printed its RLE string (empty).
 - **C:** `benchmark_print_output` uses score `-1` when the CIGAR is empty
   (`begin_offset >= end_offset`) and prints `-` for an empty CIGAR.
-- **Fix (`5e6ce55`, fork PR #15, merged):** the same rule in
+- **Fix (`5e6ce55`, HPCBio/wfa2lib-rs#15, merged):** the same rule in
   `compute_output_score` and the CIGAR column. Banded-static output is now
   byte-identical to C `16969b5b` in high, med and score-only modes (30/30
   cells).
@@ -138,7 +138,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
 
 - **Symptom:** with `set_alignment_free_ends(P0, Pf, T0, Tf)` and P0 or T0 > 0,
   the result was identical to the global alignment. Visible once the CLI
-  honoured `--wfa-span` (fork PR #16): every begin-gap cell differed from C,
+  honoured `--wfa-span` (HPCBio/wfa2lib-rs#16): every begin-gap cell differed from C,
   for every metric.
 - **Root cause:** `pattern_begin_free` / `text_begin_free` were stored but
   never read. C has two mechanisms, and neither was ported:
@@ -147,7 +147,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   - `match != 0`: `wavefront_compute_endsfree_{required,limits,init,allocate_null}`
     add cell (d,0) / (0,d) at score d * -match, before the ends are trimmed.
 - **Fix (branch `feat/endsfree-begin-gaps`):** `28cb857` (match == 0) and
-  `6a06d8f` (match != 0). Also C's extension preset (P0 = T0 = 0) and C #126's
+  `6a06d8f` (match != 0). Also C's extension preset (P0 = T0 = 0) and smarco/WFA2-lib#126's
   restriction of the seeding to the ends-free span.
 - **Parity details reproduced:**
   - C sets only `lo/hi` on M0; the initialized range stays `[0, 0]`.
@@ -165,8 +165,8 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
     CIGARs.
   - Rust reproduces it for output identity, documented on
     `set_alignment_free_ends`. **Known issue HPCBio/wfa2lib-rs#18.**
-  - Upstream report drafted, with a reproducer and a verified one-line fix:
-    set `wf_elements_init_min/max = lo/hi` on M0 in
+  - Reported upstream as smarco/WFA2-lib#142, with a reproducer and a
+    verified one-line fix: set `wf_elements_init_min/max = lo/hi` on M0 in
     `wavefront_aligner_init_wf_m`.
 - **Result:** ends-free (begin and/or end gaps) and extension are
   byte-identical to C for all metrics, match == 0 and match < 0, in

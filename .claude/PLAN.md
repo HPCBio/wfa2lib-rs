@@ -229,30 +229,30 @@ src/
 
 Differential testing (Rust vs C at the port baseline `16969b5b` and at C HEAD)
 found divergences the stock `wfa.utest.sh` doesn't exercise, mostly in
-heuristics. Work items are tracked in HPCBio/wfa2lib-rs issue #10, in this
+heuristics. Work items are tracked in HPCBio/wfa2lib-rs#10, in this
 order. Port bugs come first, because banded parity can't be checked while the
 banded path crashes.
 
-1. [x] #1 Bound check on the score-indexed component arrays (`d3618de`)
-2. [x] #2 `init_ends` wrapped slice length (`e494181`)
-3. [x] #3 Edit/indel/linear null-input handling + allocation clamp (`06c593c`, fork PR #12)
-4. [x] #4 Affine/affine2p banded termination and parity (cutoff equate, I/D trim, null inputs; fork PR #14)
-5. [ ] #8 CLI gaps:
+1. [x] HPCBio/wfa2lib-rs#1 Bound check on the score-indexed component arrays (`d3618de`)
+2. [x] HPCBio/wfa2lib-rs#2 `init_ends` wrapped slice length (`e494181`)
+3. [x] HPCBio/wfa2lib-rs#3 Edit/indel/linear null-input handling + allocation clamp (`06c593c`, HPCBio/wfa2lib-rs#12)
+4. [x] HPCBio/wfa2lib-rs#4 Affine/affine2p banded termination and parity (cutoff equate, I/D trim, null inputs; HPCBio/wfa2lib-rs#14)
+5. [ ] HPCBio/wfa2lib-rs#8 CLI gaps:
    - [x] print `-1  -` for an empty CIGAR, as C does (no alignment found)
    - [x] wire up `--wfa-span` (ends-free / extension), rejecting what C rejects
    - [ ] xdrop/zdrop `steps_between_cutoffs` parameter
    - [ ] `--wfa-memory=med|low`
    - [ ] stream input and output (CLI max RSS ~200 MB vs C's 2-10 MB)
    - [ ] document the `./WFA2-lib` checkout needed by the integration tests
-6. [ ] #5 X-drop / Z-drop in end-to-end mode
-7. [ ] #6 BiWFA heuristics; banded-adaptive as in C; port C #125
-8. [x] #9 Ends-free begin-free gaps: `match == 0` initial M seeding over `[-P0, T0]` (`28cb857`) and the `match != 0` path, `wavefront_compute_endsfree_*` (`6a06d8f`); C #126 semantics
-9. [ ] #7 BiWFA tie-breaking with match < 0
+6. [ ] HPCBio/wfa2lib-rs#5 X-drop / Z-drop in end-to-end mode
+7. [ ] HPCBio/wfa2lib-rs#6 BiWFA heuristics; banded-adaptive as in C; port smarco/WFA2-lib#125
+8. [x] HPCBio/wfa2lib-rs#9 Ends-free begin-free gaps: `match == 0` initial M seeding over `[-P0, T0]` (`28cb857`) and the `match != 0` path, `wavefront_compute_endsfree_*` (`6a06d8f`); smarco/WFA2-lib#126 semantics
+9. [ ] HPCBio/wfa2lib-rs#7 BiWFA tie-breaking with match < 0
 
 **Per-change validation:**
 - stock `wfa.utest.sh`;
 - the differential matrix (non-heuristic configs must stay byte-identical to C);
-- banded parity against C `16969b5b` until C #125 is ported;
+- banded parity against C `16969b5b` until smarco/WFA2-lib#125 is ported;
 - a debug build plus Guard Malloc (macOS) for memory-safety fixes;
 - a regression test that fails on the parent commit;
 - clippy `-D warnings`;
