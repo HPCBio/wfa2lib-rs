@@ -182,3 +182,31 @@ fallback (HPCBio/wfa2lib-rs#6, HPCBio/wfa2lib-rs#7):
 
 No measurable regression (within ~1.5%). Recursing to deeper BiWFA levels
 instead of falling back at 100 bp costs about 1% on BiWFA.
+
+### 2026-10-13 — `feat/piggyback-backtrace` vs `b1d1101` (main)
+
+Same machine and data, Rust only, minimum of 3 runs (ms). Max RSS from
+`/usr/bin/time -l`.
+
+| Mode | `b1d1101` | branch | Δ |
+|---|---|---|---|
+| Edit score | 199 | 204 | +2.5% |
+| Affine score | 1905 | 1940 | +1.8% |
+| Affine CIGAR | 2063 | 2083 | +1.0% |
+| BiWFA (ultralow) | 3346 | 3481 | +4.0% |
+| Affine2p score | 7554 | 7662 | +1.4% |
+| Affine2p CIGAR | 7970 | 8067 | +1.2% |
+| Affine `med` | 2067 (= high) | 8562 | new |
+| Affine `low` | 2079 (= high) | 10342 | new |
+
+- `med`/`low` now do what C does, and are faster than C (affine `med` 8.3 s
+  vs C 11.0 s, `low` 10.0 vs 12.1, edit `med` 0.53 vs 1.18). Affine `med`
+  max RSS is 3.6 MB (`high` 11.3, C `med` 2.1).
+- The other modes are 1–2.5% slower (4% BiWFA, measured before trimming
+  per-step checks). The cost is per score step: piggyback branches and
+  written-range tracking. Interleaved re-runs after making those checks
+  cheaper: affine score +1.8%, CIGAR +1.0%.
+- **Kernel note:** a fused raw-pointer piggyback loop (C's structure) ran
+  at 40+ ns per cell on M2 from false store/load aliasing between
+  identically aligned arrays. Per-component passes over slices
+  (`compute/piggyback.rs`) vectorize: ~4 ns per cell.

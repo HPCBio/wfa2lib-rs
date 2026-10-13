@@ -130,6 +130,12 @@ cargo run --release --bin align_benchmark -- \
     -i sequences.seq
 ```
 
+`--wfa-memory` selects `high` (default), `med`, `low` or `ultralow`, as in C.
+`med` and `low` keep only the wavefronts still needed and record the
+alignment alongside them ("piggyback" backtrace); for co-optimal alignments
+they can choose differently from `high`, exactly as C does. In the library:
+`set_memory_mode(MemoryMode::Med)`.
+
 Input files use the WFA2-lib format: each pair is two lines, `>pattern` then
 `<text`. Output is one `score<TAB>CIGAR` line per pair (`-` for no CIGAR), written
 as each pair is aligned. Like the C tool, it also supports `--wfa-span`
@@ -149,15 +155,16 @@ src/
   wavefront_set.rs    # Grouped wavefront sets (M, I, D components)
   slab.rs             # Wavefront memory pool with arena allocation
   arena.rs            # Byte-oriented bump allocator for wavefront arrays
-  compute/            # WFA compute kernels (edit, linear, affine, affine2p)
+  compute/            # WFA compute kernels (edit, linear, affine, affine2p;
+                      #   piggyback.rs: med/low-memory kernels and offloading)
   extend.rs           # Wavefront extend with SIMD acceleration
   backtrace.rs        # CIGAR traceback from wavefronts
   bialign.rs          # Bidirectional WFA (BiWFA)
   cigar.rs            # CIGAR operations and scoring
   heuristic.rs        # Pruning heuristics
   offset.rs           # Wavefront offset type and coordinate helpers
-  pcigar.rs           # Packed CIGAR for BiWFA backtrace
-  bt_buffer.rs        # Backtrace buffer for BiWFA
+  pcigar.rs           # Packed CIGAR (piggyback backtrace, med/low memory)
+  bt_buffer.rs        # Backtrace buffer (med/low memory)
   components.rs       # Wavefront component management
   termination.rs      # Alignment termination conditions
   bin/

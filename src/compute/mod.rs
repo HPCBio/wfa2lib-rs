@@ -4,6 +4,7 @@ pub mod affine;
 pub mod affine2p;
 pub mod edit;
 pub mod linear;
+pub mod piggyback;
 
 use crate::offset::{wavefront_h, wavefront_v};
 use crate::wavefront::Wavefront;

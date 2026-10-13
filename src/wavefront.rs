@@ -68,6 +68,11 @@ pub struct Wavefront {
     pub wf_elements_init_min: i32,
     /// Maximum diagonal element initialized (inclusive).
     pub wf_elements_init_max: i32,
+    /// Range of cells written since the last `init` (kernel limits plus
+    /// NULL-padded ends); piggyback reads outside it see zeroes, as C's
+    /// usually-fresh memory does.
+    pub(crate) written_lo: i32,
+    pub(crate) written_hi: i32,
     /// Maximum pcigar-ops stored in any backtrace block.
     pub bt_occupancy_max: i32,
 
@@ -149,6 +154,8 @@ impl Wavefront {
             wf_elements_allocated,
             wf_elements_init_min: 0,
             wf_elements_init_max: 0,
+            written_lo: 1,
+            written_hi: -1,
             arena_backed: false,
             bt_arena_backed: false,
         }
@@ -193,6 +200,8 @@ impl Wavefront {
             wf_elements_allocated,
             wf_elements_init_min: 0,
             wf_elements_init_max: 0,
+            written_lo: 1,
+            written_hi: -1,
             arena_backed: true,
             bt_arena_backed: allocate_backtrace,
         }
@@ -240,6 +249,8 @@ impl Wavefront {
                 wf_elements_allocated,
                 wf_elements_init_min: 0,
                 wf_elements_init_max: 0,
+                written_lo: 1,
+                written_hi: -1,
                 arena_backed: true,
                 bt_arena_backed: false, // new_at_ptr keeps bt as heap (or null)
             });
@@ -286,6 +297,8 @@ impl Wavefront {
         }
         self.wf_elements_init_min = 0;
         self.wf_elements_init_max = 0;
+        self.written_lo = 1;
+        self.written_hi = -1;
         debug_assert!(
             max_hi < min_lo + self.wf_elements_allocated,
             "max_hi={} exceeds allocated_max={} (base_k={}, alloc={})",
@@ -331,6 +344,49 @@ impl Wavefront {
         self.hi = hi;
         self.wf_elements_init_min = lo;
         self.wf_elements_init_max = hi;
+        if !self.bt_pcigar_ptr.is_null() {
+            self.mark_written(lo, hi);
+        }
+    }
+
+    /// Extend the written range to cover `[lo, hi]`.
+    #[inline(always)]
+    pub(crate) fn mark_written(&mut self, lo: i32, hi: i32) {
+        if lo > hi {
+            return;
+        }
+        if self.written_lo > self.written_hi {
+            (self.written_lo, self.written_hi) = (lo, hi);
+        } else {
+            self.written_lo = self.written_lo.min(lo);
+            self.written_hi = self.written_hi.max(hi);
+        }
+    }
+
+    /// Set cell `k` to NULL, zeroing its backtrace (marked written).
+    #[inline]
+    pub(crate) fn set_null_cell(&mut self, k: i32) {
+        self.set_offset(k, OFFSET_NULL);
+        self.zero_bt(k, 1);
+    }
+
+    /// [`Self::set_null_cell`] if `k` is within the allocated range.
+    #[inline]
+    pub(crate) fn set_null_cell_if_allocated(&mut self, k: i32) {
+        if self.is_allocated(k) {
+            self.set_null_cell(k);
+        }
+    }
+
+    /// Backtrace `(pcigar, prev)` at `k`, or zeroes if it wasn't written
+    /// since the last `init`.
+    #[inline]
+    pub fn bt_or_zero(&self, k: i32) -> (Pcigar, BtBlockIdx) {
+        if k < self.written_lo || k > self.written_hi {
+            (0, 0)
+        } else {
+            (self.get_bt_pcigar(k), self.get_bt_prev(k))
+        }
     }
 
     /// Extend the initialized range downward to `min_lo`.
@@ -355,6 +411,7 @@ impl Wavefront {
                 );
                 slice.fill(OFFSET_NULL);
             }
+            self.zero_bt(start, count);
         }
         self.wf_elements_init_min = start;
     }
@@ -380,6 +437,7 @@ impl Wavefront {
                 );
                 slice.fill(OFFSET_NULL);
             }
+            self.zero_bt(start, count);
         }
         self.wf_elements_init_max = end;
     }
@@ -435,6 +493,43 @@ impl Wavefront {
     pub fn set_bt_prev(&mut self, k: i32, value: BtBlockIdx) {
         debug_assert!(!self.bt_prev_ptr.is_null());
         unsafe { *self.bt_prev_ptr.add((k - self.base_k) as usize) = value; }
+    }
+
+    /// k-centered backtrace pointers `(pcigar, prev)`, like
+    /// [`Self::offsets_centered_ptr`]; null if the wavefront has no
+    /// backtrace arrays.
+    ///
+    /// # Safety
+    /// Only valid for `k` in `[base_k, base_k + wf_elements_allocated - 1]`.
+    #[inline(always)]
+    pub unsafe fn bt_centered_ptrs(&self) -> (*mut Pcigar, *mut BtBlockIdx) {
+        let shift = -(self.base_k as isize);
+        (
+            self.bt_pcigar_ptr.wrapping_offset(shift),
+            self.bt_prev_ptr.wrapping_offset(shift),
+        )
+    }
+
+    /// Zero the backtrace cells `[k, k + count)` (no-op without backtrace).
+    /// NULL-padded cells are still copied by the piggyback kernels; C leaves
+    /// whatever its (usually freshly calloc'd) memory holds.
+    #[inline(always)]
+    fn zero_bt(&mut self, k: i32, count: usize) {
+        if self.bt_pcigar_ptr.is_null() {
+            return;
+        }
+        self.mark_written(k, k + count as i32 - 1);
+        unsafe {
+            let (pc, pv) = self.bt_centered_ptrs();
+            std::slice::from_raw_parts_mut(pc.offset(k as isize), count).fill(0);
+            std::slice::from_raw_parts_mut(pv.offset(k as isize), count).fill(0);
+        }
+    }
+
+    /// Whether diagonal `k` lies within the allocated arrays.
+    #[inline(always)]
+    pub fn is_allocated(&self, k: i32) -> bool {
+        k >= self.base_k && k < self.base_k + self.wf_elements_allocated
     }
 
     /// Get the base k value for raw slice access.

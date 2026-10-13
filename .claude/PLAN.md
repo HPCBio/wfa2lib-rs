@@ -19,6 +19,7 @@ src/
   wavefront.rs                 -- Single Wavefront (offsets, bt fields)
   wavefront_set.rs             -- WavefrontSet (input/output refs by index)
   slab.rs                      -- WavefrontSlab (allocator/recycler)
+  arena.rs                     -- Bump arena backing slab wavefront arrays
   components.rs                -- WavefrontComponents (M/I/D arrays, bt_buffer)
   bt_buffer.rs                 -- BacktraceBuffer (bt_block segments, compaction)
   compute/
@@ -27,23 +28,22 @@ src/
     linear.rs                  -- Gap-linear compute kernel
     affine.rs                  -- Gap-affine compute kernel
     affine2p.rs                -- Gap-affine 2-piece compute kernel
+    piggyback.rs               -- Piggyback-backtrace kernels (all metrics) and
+                                  BT-block offloading (`med`/`low` memory modes)
   extend.rs                    -- Extend kernels (packed e2e, endsfree, custom)
   termination.rs               -- End2end and endsfree termination checks
   backtrace.rs                 -- Linear and affine wavefront backtrace
-  backtrace_offload.rs         -- Piggyback backtrace offloading
   heuristic.rs                 -- Heuristic strategies (banded, adaptive, xdrop, zdrop)
-  aligner.rs                   -- WavefrontAligner (main state + public API)
-  unialign.rs                  -- Unidirectional alignment loop
-  bialigner.rs                 -- BiWFA bidirectional aligner
-  bialign.rs                   -- BiWFA breakpoint detection + divide-and-conquer
-  plot.rs                      -- Wavefront plotting (optional)
-  display.rs                   -- Debug display utilities
-  utils/
-    mod.rs
-    dna.rs                     -- 2-bit packed DNA utilities
+  aligner.rs                   -- WavefrontAligner (main state + public API),
+                                  unidirectional loop and BiWFA recursion
+  bialign.rs                   -- BiWFA breakpoint detection (overlap kernels)
   bin/
     align_benchmark.rs         -- CLI driver binary
 ```
+
+Planned but not separate modules: the unidirectional loop and the BiWFA
+aligner live in `aligner.rs`; 2-bit DNA packing is in `sequences.rs`;
+plotting and debug display are not ported.
 
 ---
 
@@ -237,11 +237,11 @@ banded path crashes.
 2. [x] HPCBio/wfa2lib-rs#2 `init_ends` wrapped slice length (`e494181`)
 3. [x] HPCBio/wfa2lib-rs#3 Edit/indel/linear null-input handling + allocation clamp (`06c593c`, HPCBio/wfa2lib-rs#12)
 4. [x] HPCBio/wfa2lib-rs#4 Affine/affine2p banded termination and parity (cutoff equate, I/D trim, null inputs; HPCBio/wfa2lib-rs#14)
-5. [ ] HPCBio/wfa2lib-rs#8 CLI gaps:
+5. [x] HPCBio/wfa2lib-rs#8 CLI gaps:
    - [x] print `-1  -` for an empty CIGAR, as C does (no alignment found)
    - [x] wire up `--wfa-span` (ends-free / extension), rejecting what C rejects
    - [x] xdrop/zdrop `steps_between_cutoffs` parameter (with HPCBio/wfa2lib-rs#5)
-   - [ ] `--wfa-memory=med|low` (needs C's piggyback backtrace; also behind the `med` differences in HPCBio/wfa2lib-rs#22)
+   - [x] `--wfa-memory=med|low`: C's piggyback backtrace (root cause of HPCBio/wfa2lib-rs#22 found)
    - [x] stream input and output (`0f1eed5`; max RSS 199 MB → 2.5–10.7 MB)
    - [x] document the `./WFA2-lib` checkout needed by the integration tests (`554bcba`, README)
 6. [x] HPCBio/wfa2lib-rs#5 X-drop / Z-drop: C heuristics, Z-drop partial alignments, ported C affine backtrace, null-step counting in compute (`a3a4c4f`, `763ed8a`, `f4eb349`)

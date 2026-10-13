@@ -51,17 +51,10 @@ pub struct BacktraceBuffer {
 impl BacktraceBuffer {
     /// Create a new backtrace buffer.
     pub fn new() -> Self {
-        let initial_segment = vec![
-            BtBlock {
-                pcigar: 0,
-                prev_idx: BT_BLOCK_IDX_NULL,
-            };
-            BT_BUFFER_SEGMENT_LENGTH
-        ];
         Self {
             segment_idx: 0,
             segment_offset: 0,
-            segments: vec![initial_segment],
+            segments: vec![new_segment()],
             alignment_init_pos: Vec::with_capacity(100),
             num_compacted_blocks: 0,
             num_compactions: 0,
@@ -121,7 +114,13 @@ impl BacktraceBuffer {
         let global_idx =
             (self.segment_idx * BT_BUFFER_SEGMENT_LENGTH + self.segment_offset) as BtBlockIdx;
 
-        self.segments[self.segment_idx][self.segment_offset] = BtBlock { pcigar, prev_idx };
+        let block = BtBlock { pcigar, prev_idx };
+        let segment = &mut self.segments[self.segment_idx];
+        if self.segment_offset < segment.len() {
+            segment[self.segment_offset] = block;
+        } else {
+            segment.push(block); // Commits memory only as it is used
+        }
 
         self.segment_offset += 1;
         if self.segment_offset >= BT_BUFFER_SEGMENT_LENGTH {
@@ -146,13 +145,32 @@ impl BacktraceBuffer {
             (self.segment_idx * BT_BUFFER_SEGMENT_LENGTH + self.segment_offset) as BtBlockIdx;
         let available = BT_BUFFER_SEGMENT_LENGTH - self.segment_offset;
         let offset = self.segment_offset;
-        let slice = &mut self.segments[self.segment_idx][offset..];
+        // Hand out the whole free segment (committing it).
+        let segment = &mut self.segments[self.segment_idx];
+        segment.resize(
+            BT_BUFFER_SEGMENT_LENGTH,
+            BtBlock {
+                pcigar: 0,
+                prev_idx: 0,
+            },
+        );
+        let slice = &mut segment[offset..];
         (global_idx, slice, available)
     }
 
     /// Advance the write position by `used` blocks.
     pub fn add_used(&mut self, used: usize) {
         self.segment_offset += used;
+        let segment = &mut self.segments[self.segment_idx];
+        if segment.len() < self.segment_offset.min(BT_BUFFER_SEGMENT_LENGTH) {
+            segment.resize(
+                self.segment_offset.min(BT_BUFFER_SEGMENT_LENGTH),
+                BtBlock {
+                    pcigar: 0,
+                    prev_idx: 0,
+                },
+            );
+        }
         if self.segment_offset >= BT_BUFFER_SEGMENT_LENGTH {
             self.reserve_next_segment();
         }
@@ -170,6 +188,23 @@ impl BacktraceBuffer {
         }
 
         // Return the initial block (contains init_pos index in pcigar field)
+        block
+    }
+
+    /// C's `wf_backtrace_buffer_traceback_pcigar` from an end cell's
+    /// `(pcigar, prev)`: collect the pcigars back to the initial block (end
+    /// first) into `alignment_packed`, and return the initial block, whose
+    /// `pcigar` indexes `alignment_init_pos`.
+    pub fn traceback_from(&mut self, pcigar_last: Pcigar, prev_last: BtBlockIdx) -> BtBlock {
+        self.alignment_packed.clear();
+        let mut block = BtBlock {
+            pcigar: pcigar_last,
+            prev_idx: prev_last,
+        };
+        while block.prev_idx != BT_BLOCK_IDX_NULL {
+            self.alignment_packed.push(block.pcigar);
+            block = self.get_block(block.prev_idx);
+        }
         block
     }
 
@@ -193,15 +228,15 @@ impl BacktraceBuffer {
                 "BacktraceBuffer: reached maximum addressable index"
             );
 
-            self.segments.push(vec![
-                BtBlock {
-                    pcigar: 0,
-                    prev_idx: BT_BLOCK_IDX_NULL,
-                };
-                BT_BUFFER_SEGMENT_LENGTH
-            ]);
+            self.segments.push(new_segment());
         }
     }
+}
+
+/// An empty segment with room for `BT_BUFFER_SEGMENT_LENGTH` blocks. Like
+/// C's `calloc`'d segments, memory is only committed as blocks are stored.
+fn new_segment() -> Vec<BtBlock> {
+    Vec::with_capacity(BT_BUFFER_SEGMENT_LENGTH)
 }
 
 impl Default for BacktraceBuffer {

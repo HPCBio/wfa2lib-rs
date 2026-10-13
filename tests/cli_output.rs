@@ -341,3 +341,45 @@ fn biwfa_match_reward_tie_breaks_match_c() {
         ]
     );
 }
+
+/// Run `align_benchmark` on a file in `tests/data/`; return the output.
+fn run_file(name: &str, args: &[&str]) -> String {
+    let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let out = Command::new(env!("CARGO_BIN_EXE_align_benchmark"))
+        .arg("-i")
+        .arg(data.join(name))
+        .args(args)
+        .output()
+        .expect("failed to run align_benchmark");
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn memory_med_low_match_c() {
+    // wfa.utest.seq pair 201 with X-drop every 10 steps. With `med`/`low`
+    // (piggyback backtrace) C gives a valid alignment, different from its
+    // `high` result (whose CIGAR is invalid, HPCBio/wfa2lib-rs#21). Expected
+    // outputs are from C's driver (3282f83). `--wfa-memory=med|low` used to
+    // behave like `high`.
+    let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let expected = |f: &str| fs::read_to_string(data.join(f)).unwrap();
+    for (mem, alg) in [
+        ("med", "xdrop_med.med_low.alg"),
+        ("low", "xdrop_med.med_low.alg"),
+        ("high", "xdrop_med.high.alg"),
+    ] {
+        let mem = format!("--wfa-memory={mem}");
+        let out = run_file(
+            "xdrop_med.seq",
+            &[
+                "-a",
+                "gap-affine-wfa",
+                &mem,
+                "--wfa-heuristic=xdrop",
+                "--wfa-heuristic-parameters=50,10",
+            ],
+        );
+        assert_eq!(out, expected(alg), "{mem}");
+    }
+}

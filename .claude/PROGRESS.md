@@ -33,9 +33,10 @@ sync" below.
 | Stock `wfa.utest.sh` | 60/60 identical (BiWFA match < 0 tie-breaks fixed, HPCBio/wfa2lib-rs#7) |
 | banded-static (affine, affine2p, linear) | Byte-identical to C 3282f83 (with smarco/WFA2-lib#125's band clamp) in high / med / score-only modes, including unreachable pairs |
 | banded-static (edit, indel) | Rust stops as unreachable; C never terminates (C bug, HPCBio/wfa2lib-rs#24) |
-| banded-adaptive | C's re-centred band ported (HPCBio/wfa2lib-rs#6): 34/36 matrix cells byte-identical to C 3282f83; the other 2 are `med` (C piggyback, HPCBio/wfa2lib-rs#8) |
-| xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 3282f83 in high and score-only modes (450/576 matrix cells; the other 126 are `med`, where C uses its piggyback backtrace, HPCBio/wfa2lib-rs#8 / HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#21, HPCBio/wfa2lib-rs#23 |
+| banded-adaptive | C's re-centred band ported (HPCBio/wfa2lib-rs#6): byte-identical to C 3282f83 in high / score-only / med / low (48/48) |
+| xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 3282f83 in high / score-only / med (556/576 matrix cells). The other 20 are Z-drop `med` with match < 0, where C reads uninitialized memory (HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#21, HPCBio/wfa2lib-rs#23 |
 | BiWFA + any heuristic | Byte-identical to C 3282f83 (168/168: banded-static/adaptive, xdrop, zdrop, wfa-adaptive; CIGAR and score-only; HPCBio/wfa2lib-rs#6) |
+| `--wfa-memory=med\|low` (piggyback backtrace) | Byte-identical to C 3282f83 for all metrics (28/28 matrix cells, 50k × 1 kb), with heuristics as above (HPCBio/wfa2lib-rs#8) |
 | extension; ends-free with end gaps only | Byte-identical to C (all metrics incl. match < 0, alignment and score-only) |
 | ends-free with begin gaps (P0/T0 > 0) | Byte-identical to C, match == 0 and match < 0, alignment / score-only / med (HPCBio/wfa2lib-rs#9). Note: for edit/indel this includes a C bug that can emit an invalid CIGAR (known issue HPCBio/wfa2lib-rs#18, from C `380eb31b`) |
 
@@ -59,7 +60,10 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 - HPCBio/wfa2lib-rs#21: X-drop with `steps_between_cutoffs > 1` returns invalid
   CIGARs (C high-memory backtrace over pruned diagonals; C's `med` is valid).
 - HPCBio/wfa2lib-rs#22: Z-drop results differ between C's high-memory and `med`
-  modes (Rust matches high; root cause open).
+  modes. Root cause: in `med`/`low`, C backtraces from the end diagonal at
+  the current score, often a dead cell whose chain comes from uninitialized
+  memory, so C's output depends on earlier alignments. Rust reads such
+  cells as zeroes (deterministic; matches C on fresh memory).
 - HPCBio/wfa2lib-rs#23: score-only score for unreachable alignments (match < 0)
   is evaluated at C's unset end position (signed overflow); reproduced.
 - HPCBio/wfa2lib-rs#24: edit/indel + banded-static never terminates in C;
@@ -96,3 +100,6 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   statuses, BiWFA score-only) and HPCBio/wfa2lib-rs#7 (BiWFA length fallback at
   the top level only). BiWFA × every heuristic is now byte-identical to C
   3282f83, and the stock `wfa.utest.sh` is 60/60.
+- **2026-10-13:** HPCBio/wfa2lib-rs#8 `--wfa-memory=med|low`: ported C's
+  piggyback backtrace (kernels, offloading, backtrace buffer, unpacking).
+  Root cause of HPCBio/wfa2lib-rs#22 found.
