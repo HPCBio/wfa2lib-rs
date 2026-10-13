@@ -101,5 +101,5 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   the top level only). BiWFA × every heuristic is now byte-identical to C
   3282f83, and the stock `wfa.utest.sh` is 60/60.
 - **2026-10-13:** HPCBio/wfa2lib-rs#8 `--wfa-memory=med|low`: ported C's
-  piggyback backtrace (kernels, offloading, backtrace buffer, unpacking).
-  Root cause of HPCBio/wfa2lib-rs#22 found.
+  piggyback backtrace (kernels, offloading, backtrace buffer, unpacking) and
+  buffer compaction. Root cause of HPCBio/wfa2lib-rs#22 found.

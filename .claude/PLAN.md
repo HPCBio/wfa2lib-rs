@@ -241,7 +241,7 @@ banded path crashes.
    - [x] print `-1  -` for an empty CIGAR, as C does (no alignment found)
    - [x] wire up `--wfa-span` (ends-free / extension), rejecting what C rejects
    - [x] xdrop/zdrop `steps_between_cutoffs` parameter (with HPCBio/wfa2lib-rs#5)
-   - [x] `--wfa-memory=med|low`: C's piggyback backtrace (root cause of HPCBio/wfa2lib-rs#22 found)
+   - [x] `--wfa-memory=med|low`: C's piggyback backtrace and buffer compaction (root cause of HPCBio/wfa2lib-rs#22 found)
    - [x] stream input and output (`0f1eed5`; max RSS 199 MB → 2.5–10.7 MB)
    - [x] document the `./WFA2-lib` checkout needed by the integration tests (`554bcba`, README)
 6. [x] HPCBio/wfa2lib-rs#5 X-drop / Z-drop: C heuristics, Z-drop partial alignments, ported C affine backtrace, null-step counting in compute (`a3a4c4f`, `763ed8a`, `f4eb349`)

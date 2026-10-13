@@ -321,3 +321,25 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
     vs 11.0 s). Max RSS 3.6 MB (`high`: 11.3 MB).
 - **Tests:** `tests/cli_output.rs::memory_med_low_match_c` (fixtures in
   `tests/data/`).
+
+## 11. Backtrace buffer never compacted (med/low)
+
+- **Symptom:** with piggyback backtrace, the backtrace buffer only grows. C
+  compacts it during long alignments, so `med`/`low` stay bounded.
+- **C design ported** (`wavefront_unialign_reached_limits`,
+  `wavefront_components_compact_bt_buffer`,
+  `wf_backtrace_buffer_compact_marked`):
+  - Every 6000 scores, if the buffer exceeds `max_memory_compact` (256 MB),
+    C marks the blocks reachable from live cells of the wavefronts still in
+    scope. It moves those blocks down after the already compacted ones,
+    translating their `prev` indices by exclusive rank, and translates the
+    cells' indices.
+  - After `max_partial_compacts` compactions (4 for `med`, 1 for `low`),
+    the next one starts over from block 0.
+  - C quirks kept: the compacted-block count is set one short (the last
+    index); only live cells are translated; and the "telescopic" limit
+    update assigns a local, so the threshold stays 256 MB.
+- **Rust:** `set_max_memory_compact` exposes the threshold (fixed in C) so
+  compaction can be tested on small inputs. It never changes results.
+- **Test:** `aligner::tests::test_piggyback_compaction_keeps_alignment`
+  (forced compaction at score 6000 gives the same CIGAR, `med` and `low`).

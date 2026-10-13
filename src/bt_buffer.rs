@@ -233,6 +233,96 @@ impl BacktraceBuffer {
     }
 }
 
+/// Bitmap over block indices with exclusive rank (C's `bitmap_t`, used to
+/// compact the buffer).
+pub struct Bitmap {
+    words: Vec<u64>,
+    /// Set bits in all words before each word (after `update_counters`).
+    counters: Vec<u64>,
+}
+
+impl Bitmap {
+    /// A cleared bitmap for indices `[0, length)`.
+    pub fn new(length: u64) -> Self {
+        let n = length.div_ceil(64) as usize;
+        Self {
+            words: vec![0; n],
+            counters: vec![0; n],
+        }
+    }
+
+    /// Set bit `idx`; return whether it was already set (C's
+    /// `bitmap_check__set`).
+    #[inline]
+    pub fn check_set(&mut self, idx: BtBlockIdx) -> bool {
+        let (w, b) = ((idx / 64) as usize, idx % 64);
+        let was = self.words[w] >> b & 1 == 1;
+        self.words[w] |= 1 << b;
+        was
+    }
+
+    /// Whether bit `idx` is set.
+    #[inline]
+    pub fn is_set(&self, idx: BtBlockIdx) -> bool {
+        self.words[(idx / 64) as usize] >> (idx % 64) & 1 == 1
+    }
+
+    /// Recompute the per-word counters (C's `bitmap_update_counters`).
+    pub fn update_counters(&mut self) {
+        let mut total = 0;
+        for (c, w) in self.counters.iter_mut().zip(&self.words) {
+            *c = total;
+            total += w.count_ones() as u64;
+        }
+    }
+
+    /// Number of set bits before `idx` (C's `bitmap_erank`).
+    #[inline]
+    pub fn erank(&self, idx: BtBlockIdx) -> u64 {
+        let (w, b) = ((idx / 64) as usize, idx % 64);
+        self.counters[w] + (self.words[w] & ((1u64 << b) - 1)).count_ones() as u64
+    }
+}
+
+impl BacktraceBuffer {
+    /// Mark the chain of blocks from `idx` (C's
+    /// `wf_backtrace_buffer_mark_backtrace_batch`, one cell): stop at an
+    /// already marked block, NULL, or an already compacted block.
+    pub fn mark_chain(&self, idx: BtBlockIdx, bitmap: &mut Bitmap) {
+        let mut idx = idx;
+        while idx != BT_BLOCK_IDX_NULL && idx >= self.num_compacted_blocks {
+            if bitmap.check_set(idx) {
+                return;
+            }
+            idx = self.get_block(idx).prev_idx;
+        }
+    }
+
+    /// C's `wf_backtrace_buffer_compact_marked`: move the marked blocks
+    /// down after the compacted ones, translating their `prev_idx`. Returns
+    /// C's value, the last written index (one short of the block count).
+    pub fn compact_marked(&mut self, bitmap: &Bitmap) -> BtBlockIdx {
+        let compacted = self.num_compacted_blocks;
+        let max_block_idx = self.get_used() as BtBlockIdx;
+        let mut write = compacted;
+        for read in compacted..max_block_idx {
+            if bitmap.is_set(read) {
+                let mut block = self.get_block(read);
+                let prev = block.prev_idx;
+                if prev != BT_BLOCK_IDX_NULL && prev >= compacted {
+                    block.prev_idx = compacted + bitmap.erank(prev) as BtBlockIdx;
+                }
+                self.set_block(write, block);
+                write += 1;
+            }
+        }
+        self.segment_idx = write as usize / BT_BUFFER_SEGMENT_LENGTH;
+        self.segment_offset = write as usize % BT_BUFFER_SEGMENT_LENGTH;
+        self.num_compactions += 1;
+        write.wrapping_sub(1)
+    }
+}
+
 /// An empty segment with room for `BT_BUFFER_SEGMENT_LENGTH` blocks. Like
 /// C's `calloc`'d segments, memory is only committed as blocks are stored.
 fn new_segment() -> Vec<BtBlock> {

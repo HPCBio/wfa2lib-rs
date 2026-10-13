@@ -164,7 +164,7 @@ src/
   heuristic.rs        # Pruning heuristics
   offset.rs           # Wavefront offset type and coordinate helpers
   pcigar.rs           # Packed CIGAR (piggyback backtrace, med/low memory)
-  bt_buffer.rs        # Backtrace buffer (med/low memory)
+  bt_buffer.rs        # Backtrace buffer and compaction (med/low memory)
   components.rs       # Wavefront component management
   termination.rs      # Alignment termination conditions
   bin/

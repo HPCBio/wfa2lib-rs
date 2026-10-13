@@ -13,10 +13,10 @@
 //! matching C's separate `mwavefronts[]`, `i1wavefronts[]`, etc. arrays
 //! for optimal cache behavior when accessing the same component across scores.
 
-use crate::bt_buffer::BacktraceBuffer;
+use crate::bt_buffer::{BT_BLOCK_IDX_NULL, BacktraceBuffer, Bitmap};
 use crate::offset::wavefront_length;
 use crate::penalties::{DistanceMetric, WavefrontPenalties};
-use crate::wavefront::Wavefront;
+use crate::wavefront::{BtBlockIdx, Wavefront};
 
 /// Sentinel pointer indicating no wavefront is allocated.
 pub const WF_PTR_NONE: *mut Wavefront = std::ptr::null_mut();
@@ -211,6 +211,51 @@ impl<const N: usize> WavefrontComponents<N> {
             self.wavefront_null.resize(proposed_length);
             self.wavefront_null.init_null(proposed_lo, proposed_hi);
         }
+    }
+
+    /// C's `wavefront_components_compact_bt_buffer`: keep only the
+    /// backtrace blocks reachable from live cells of the wavefronts still in
+    /// scope (scores `score - max_score_scope + 1 ..= score`), compacting
+    /// the buffer and translating the cells' block indices.
+    pub fn compact_bt_buffer(&mut self, score: usize) {
+        let Some(buf) = self.bt_buffer.as_mut() else {
+            return;
+        };
+        let scope = self.max_score_scope;
+        let mut bitmap = Bitmap::new(buf.get_used());
+        let wavefronts: Vec<*mut Wavefront> = (0..scope)
+            .flat_map(|i| {
+                let slot = (score - i) % scope;
+                self.arrays.iter().map(move |a| a[slot])
+            })
+            .filter(|p| !p.is_null())
+            .collect();
+        // Mark the active working set.
+        for &wf in &wavefronts {
+            let wf = unsafe { &*wf };
+            for k in wf.lo..=wf.hi {
+                if wf.get_offset(k) >= 0 {
+                    buf.mark_chain(wf.get_bt_prev(k), &mut bitmap);
+                }
+            }
+        }
+        bitmap.update_counters();
+        let total = buf.compact_marked(&bitmap);
+        // Translate the live cells' indices (C assumes they point past the
+        // compacted blocks).
+        let compacted = buf.num_compacted_blocks;
+        for &wf in &wavefronts {
+            let wf = unsafe { &mut *wf };
+            for k in wf.lo..=wf.hi {
+                if wf.get_offset(k) >= 0 {
+                    let prev = wf.get_bt_prev(k);
+                    if prev != BT_BLOCK_IDX_NULL {
+                        wf.set_bt_prev(k, compacted + bitmap.erank(prev) as BtBlockIdx);
+                    }
+                }
+            }
+        }
+        buf.num_compacted_blocks = total;
     }
 
     // --- Accessor helpers ---

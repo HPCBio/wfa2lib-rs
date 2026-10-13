@@ -119,6 +119,8 @@ pub struct WavefrontAligner<const N: usize> {
 
     /// Memory mode for alignments (see [`MemoryMode`]).
     pub memory_mode: MemoryMode,
+    /// Backtrace-buffer size (bytes) above which med/low compact it.
+    pub max_memory_compact: u64,
 
     // System limits
     pub max_alignment_steps: i32,
@@ -279,6 +281,11 @@ fn with_band(h: &HeuristicStrategy, min_k: i32, max_k: i32) -> HeuristicStrategy
 /// only grow afterwards, so their capacity (the score limit in full-memory
 /// mode) is at least that for 1000 x 1000 -- heuristics can push an
 /// alignment past the bound computed for the actual lengths.
+/// C's default `max_memory_compact` (`BUFFER_SIZE_256M`).
+const MAX_MEMORY_COMPACT: u64 = 256 << 20;
+/// C's `probe_interval_compact` (6000; checked within the 3000 global
+/// interval, so every 6000 scores).
+const PROBE_INTERVAL_COMPACT: i32 = 6000;
 const PATTERN_LENGTH_INIT: i32 = 1000;
 const TEXT_LENGTH_INIT: i32 = 1000;
 
@@ -346,6 +353,7 @@ impl<const N: usize> WavefrontAligner<N> {
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
             memory_mode: MemoryMode::High,
+            max_memory_compact: MAX_MEMORY_COMPACT,
             max_alignment_steps: i32::MAX,
             biwfa_fwd: None,
             biwfa_rev: None,
@@ -356,6 +364,46 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Set the memory mode used for alignments (see [`MemoryMode`]).
     pub fn set_memory_mode(&mut self, mode: MemoryMode) {
         self.memory_mode = mode;
+    }
+
+    /// Set the backtrace-buffer size (bytes) above which the med/low modes
+    /// compact it (default 256 MB, fixed in C). Compaction only frees
+    /// memory; it doesn't change results.
+    pub fn set_max_memory_compact(&mut self, bytes: u64) {
+        self.max_memory_compact = bytes;
+    }
+
+    /// C's backtrace-buffer check in `wavefront_unialign_reached_limits`,
+    /// after computing `score`: every `PROBE_INTERVAL_COMPACT` scores,
+    /// compact the buffer if it exceeds `max_memory_compact`. After
+    /// `max_partial_compacts` compactions (4 for med, 1 for low) the next
+    /// one starts over from the first block.
+    #[inline(always)]
+    fn probe_bt_buffer(&mut self, score: i32) {
+        if !self.wf_components.bt_piggyback || score % PROBE_INTERVAL_COMPACT != 0 {
+            return;
+        }
+        self.compact_bt_buffer_if_needed(score);
+    }
+
+    #[cold]
+    fn compact_bt_buffer_if_needed(&mut self, score: i32) {
+        let Some(buf) = self.wf_components.bt_buffer.as_ref() else {
+            return;
+        };
+        if buf.get_size_used() <= self.max_memory_compact {
+            return;
+        }
+        self.wf_components.compact_bt_buffer(score as usize);
+        let max_partial_compacts = if self.memory_mode == MemoryMode::Low {
+            1
+        } else {
+            4
+        };
+        let buf = self.wf_components.bt_buffer.as_mut().unwrap();
+        if buf.num_compactions >= max_partial_compacts {
+            buf.reset_compaction();
+        }
     }
 
     /// Rebuild the components and slab with or without backtrace arrays and
@@ -478,6 +526,7 @@ impl<const N: usize> WavefrontAligner<N> {
                 self.status = AlignStatus::MaxStepsReached;
                 break;
             }
+            self.probe_bt_buffer(score);
         }
 
         // Record how many flat slots were used (for efficient clear on next alignment).
@@ -575,6 +624,7 @@ impl<const N: usize> WavefrontAligner<N> {
                 self.status = AlignStatus::MaxStepsReached;
                 break;
             }
+            self.probe_bt_buffer(score);
         }
 
         // Record how many flat slots were used (for efficient clear on next alignment).
@@ -2070,6 +2120,7 @@ impl<const N: usize> WavefrontAligner<N> {
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
             memory_mode: MemoryMode::High,
+            max_memory_compact: MAX_MEMORY_COMPACT,
             max_alignment_steps: i32::MAX,
             biwfa_fwd: None,
             biwfa_rev: None,
@@ -3559,6 +3610,50 @@ mod tests {
         text.remove(120);
         text.insert(200, b'G');
         (pattern, text)
+    }
+
+    #[test]
+    fn test_piggyback_compaction_keeps_alignment() {
+        // Unrelated 3 kb sequences: affine score ~6900, past the first
+        // compaction probe (score 6000).
+        let mut x = 7u32;
+        let mut seq = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                    b"ACGT"[(x >> 16) as usize % 4]
+                })
+                .collect()
+        };
+        let (pattern, text) = (seq(3000), seq(3000));
+        let align = |mode: MemoryMode, compact_at: u64| {
+            let mut a = AffineAligner::new(WavefrontPenalties::new_affine(
+                crate::penalties::AffinePenalties {
+                    match_: 0,
+                    mismatch: 4,
+                    gap_opening: 6,
+                    gap_extension: 2,
+                },
+            ));
+            a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+            a.set_memory_mode(mode);
+            a.set_max_memory_compact(compact_at);
+            let score = a.align_end2end(&pattern, &text);
+            assert!(
+                score > 6000,
+                "score {score} must reach the compaction probe"
+            );
+            let compactions = a.wf_components.bt_buffer.as_ref().unwrap().num_compactions;
+            (a.cigar().to_string_rle(true), compactions)
+        };
+        for mode in [MemoryMode::Med, MemoryMode::Low] {
+            let (plain, n) = align(mode, u64::MAX);
+            assert_eq!(n, 0);
+            let (compacted, n) = align(mode, 0);
+            assert_eq!(compacted, plain, "{mode:?}");
+            // Med keeps counting compactions; low resets after each one.
+            assert_eq!(n, if mode == MemoryMode::Med { 1 } else { 0 });
+        }
     }
 
     #[test]
