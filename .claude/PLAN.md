@@ -47,6 +47,9 @@ tests/
   differential/                -- Rust-vs-C differential harness (run.sh,
                                   cases.sh, build_c.sh, C_COMMIT, known_diffs.tsv)
 bench/                         -- Rust-vs-C timing scripts
+.github/workflows/
+  ci.yml                       -- CI: clippy, tests, wfa_utest.sh (Linux, macOS);
+                                  differential harness (Linux)
 ```
 
 Planned but not separate modules: the unidirectional loop and the BiWFA

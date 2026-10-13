@@ -82,6 +82,10 @@ For broader parity checks, `tests/differential/run.sh` builds C's
 1300 configurations (metrics, spans, heuristics, memory modes); see
 [`tests/differential/README.md`](tests/differential/README.md).
 
+CI (`.github/workflows/ci.yml`) runs clippy, the tests, a library-only build
+and `wfa_utest.sh` on Linux and macOS, and the differential harness on Linux,
+for every pull request and push to `main`.
+
 ## Usage
 
 ### As a library
@@ -181,6 +185,8 @@ tests/
   data/               # Fixtures for the CLI tests
   differential/       # Rust-vs-C differential harness (pinned C commit)
 bench/                # Rust-vs-C timing scripts
+.github/workflows/
+  ci.yml              # CI: clippy, tests, wfa_utest.sh, differential harness
 ```
 
 ## License

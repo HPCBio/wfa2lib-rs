@@ -110,3 +110,6 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   C built at a pinned commit, 1262 cases over metrics, spans, heuristics and
   memory modes, with known differences listed (HPCBio/wfa2lib-rs#10). CI
   proposed in HPCBio/wfa2lib-rs#29.
+- **2026-10-13:** CI (HPCBio/wfa2lib-rs#29): GitHub Actions runs clippy,
+  the tests, a library-only build and `wfa_utest.sh` on Linux and macOS, and
+  the differential harness on Linux, on every PR and push to `main`.
