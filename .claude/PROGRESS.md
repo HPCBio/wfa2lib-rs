@@ -71,6 +71,12 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   is evaluated at C's unset end position (signed overflow); reproduced.
 - HPCBio/wfa2lib-rs#24: edit/indel + banded-static never terminates in C;
   Rust deliberately terminates (divergence).
+- HPCBio/wfa2lib-rs#34: C's ends-free/extension results depend on the CPU.
+  Built with `-march=native` on AVX2/AVX-512, C's ends-free extend checks
+  termination in a different diagonal order from its scalar kernel, so it
+  can end on a different diagonal (other score and CIGAR). Rust follows
+  the scalar order on every CPU; the harness builds C without
+  `-march=native`.
 - smarco/WFA2-lib#102: ends-free with match < 0 can be suboptimal, depending on argument
   order. This showed up in HPCBio/dada2-rs#51. Note that dada2-rs's
   "free leading end-gap not credited" failure mode was the Rust HPCBio/wfa2lib-rs#9 bug,
@@ -112,4 +118,6 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   proposed in HPCBio/wfa2lib-rs#29.
 - **2026-10-13:** CI (HPCBio/wfa2lib-rs#29): GitHub Actions runs clippy,
   the tests, a library-only build and `wfa_utest.sh` on Linux and macOS, and
-  the differential harness on Linux, on every PR and push to `main`.
+  the differential harness on Linux, on every PR and push to `main`. Its
+  first run on x86 found HPCBio/wfa2lib-rs#34 (C's AVX2 ends-free kernel)
+  and x86-only clippy errors.

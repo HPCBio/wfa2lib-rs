@@ -29,11 +29,19 @@ mkdir -p "$(dirname "$DEST")"
 git clone --quiet "$WFA2_LIB_REPO" "$DEST" >&2
 git -C "$DEST" checkout --quiet "$COMMIT"
 
-# Apple clang has no OpenMP: drop -fopenmp (the parallel code is unused here).
-if [ "$(uname)" = Darwin ]; then
-  grep -rl --include=Makefile -e '-fopenmp' "$DEST" | while read -r mk; do
-    sed -i '' 's/ *-fopenmp//g' "$mk"
+# Drop -march=native so C uses its scalar kernels on every machine. With
+# AVX2, C's ends-free extend checks termination in a different diagonal
+# order and can end on a different diagonal (other CIGAR and score); the
+# Rust port follows the scalar order. See HPCBio/wfa2lib-rs#34.
+# Apple clang has no OpenMP: also drop -fopenmp (unused here).
+drop_flag() { # pattern
+  grep -rl --include=Makefile -e "$1" "$DEST" | while read -r mk; do
+    sed "s/ *$1//g" "$mk" > "$mk.tmp" && mv "$mk.tmp" "$mk"
   done
+}
+drop_flag '-march=native'
+if [ "$(uname)" = Darwin ]; then
+  drop_flag '-fopenmp'
 fi
 
 make -C "$DEST" >"$DEST/build.log" 2>&1 || {
