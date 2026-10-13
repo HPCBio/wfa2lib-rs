@@ -82,9 +82,10 @@ For broader parity checks, `tests/differential/run.sh` builds C's
 1300 configurations (metrics, spans, heuristics, memory modes); see
 [`tests/differential/README.md`](tests/differential/README.md).
 
-CI (`.github/workflows/ci.yml`) runs clippy, the tests, a library-only build
-and `wfa_utest.sh` on Linux and macOS, and the differential harness on Linux,
-for every pull request and push to `main`.
+CI (`.github/workflows/ci.yml`) runs clippy, the tests, a library-only build,
+`wfa_utest.sh` and the differential harness on Linux (x86-64) and macOS
+(arm64) for every pull request and push to `main`. Running the harness on both
+checks that Rust's x86 and ARM SIMD paths give the same output.
 
 ## Usage
 

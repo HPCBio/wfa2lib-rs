@@ -119,7 +119,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   memory modes, with known differences listed (HPCBio/wfa2lib-rs#10). CI
   proposed in HPCBio/wfa2lib-rs#29.
 - **2026-10-13:** CI (HPCBio/wfa2lib-rs#29): GitHub Actions runs clippy,
-  the tests, a library-only build and `wfa_utest.sh` on Linux and macOS, and
-  the differential harness on Linux, on every PR and push to `main`. Its
+  the tests, a library-only build, `wfa_utest.sh` and the differential
+  harness on Linux (x86-64) and macOS (arm64), on every PR and push to
+  `main`, so Rust is checked to be deterministic across platforms. Its
   first run on x86 found HPCBio/wfa2lib-rs#34 (C's AVX2 ends-free kernel)
   and x86-only clippy errors.

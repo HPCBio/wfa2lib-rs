@@ -43,16 +43,19 @@ jobs:
       - name: Stock C unit tests
         run: bash tests/wfa_utest.sh
 
-  # Suites run as parallel jobs; span is the longest (~8 min on 2 Apple
-  # M-series cores).
+  # Suites run as parallel jobs; span is the longest (~15 min on Linux).
+  # Linux runs Rust's x86 AVX2 kernels, macOS (arm64) its NEON ones, so
+  # together they check that Rust gives the same output on both. macOS
+  # runners have 3 cores and 7 GB, so run.sh uses 1 job there.
   differential:
-    name: Differential vs C (${{ matrix.suites }})
-    runs-on: ubuntu-latest
+    name: Differential vs C (${{ matrix.os }}, ${{ matrix.suites }})
+    runs-on: ${{ matrix.os }}
     # Each case also has its own timeout (run.sh TIMEOUT, 300 s).
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         suites: [core, span, drops, banded adaptive biwfa]
     steps:
       - uses: actions/checkout@v4
