@@ -87,6 +87,7 @@ pub fn extend_matches_packed_end2end(sequences: &WavefrontSequences, wf: &mut Wa
 /// where all 4 bytes match, falls back to scalar to continue the extension.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn extend_end2end_avx2(
     pattern_base: *const u8,
     text_base: *const u8,
@@ -264,6 +265,7 @@ pub fn extend_matches_packed_end2end_max(
 /// AVX2 extend kernel with max antidiagonal tracking (for BiWFA).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn extend_end2end_max_avx2(
     pattern_base: *const u8,
     text_base: *const u8,
