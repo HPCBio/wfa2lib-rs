@@ -889,6 +889,10 @@ impl<const N: usize> WavefrontAligner<N> {
         // extend. Computing from them would widen the range every step.
         if is_null_wf(misms_ptr) && is_null_wf(gap_ptr) {
             self.set_null_output_m(score_curr);
+            if let Some(k) = self.endsfree_begin_k(score) {
+                let wf = self.endsfree_null_m(k);
+                self.wf_components.set_m_ptr(score_curr, wf);
+            }
             return;
         }
 
@@ -968,6 +972,9 @@ impl<const N: usize> WavefrontAligner<N> {
         // Trim ends
         {
             let wf_curr = unsafe { &mut *curr_ptr };
+            if let Some(k) = self.endsfree_begin_k(score) {
+                self.endsfree_init(wf_curr, k);
+            }
             compute::trim_ends(plen, tlen, wf_curr);
             if wf_curr.null {
                 self.num_null_steps = i32::MAX;
@@ -1007,6 +1014,10 @@ impl<const N: usize> WavefrontAligner<N> {
             && is_null_wf(ptr_d1_ext)
         {
             self.free_output_wavefronts_affine(out_slot);
+            if let Some(k) = self.endsfree_begin_k(score) {
+                let wf = self.endsfree_null_m(k);
+                self.wf_components.set_m_ptr_slot(out_slot, wf);
+            }
             return;
         }
 
@@ -1135,6 +1146,9 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Trim all output wavefronts independently, as C's `process_ends` does.
         // I/D may keep valid diagonals outside M's trimmed range.
+        if let Some(k) = self.endsfree_begin_k(score) {
+            self.endsfree_init(unsafe { &mut *m_curr_ptr }, k);
+        }
         unsafe {
             compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
             compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
@@ -1190,6 +1204,10 @@ impl<const N: usize> WavefrontAligner<N> {
             && is_null_wf(ptr_d2_ext)
         {
             self.free_output_wavefronts_affine2p(out_slot);
+            if let Some(k) = self.endsfree_begin_k(score) {
+                let wf = self.endsfree_null_m(k);
+                self.wf_components.set_m_ptr_slot(out_slot, wf);
+            }
             return;
         }
 
@@ -1412,6 +1430,9 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Trim all output wavefronts independently, as C's `process_ends` does.
         // I/D may keep valid diagonals outside M's trimmed range.
+        if let Some(k) = self.endsfree_begin_k(score) {
+            self.endsfree_init(unsafe { &mut *m_curr_ptr }, k);
+        }
         unsafe {
             compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
             compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
@@ -2046,6 +2067,86 @@ impl<const N: usize> WavefrontAligner<N> {
         } else {
             false
         }
+    }
+
+    /// C's `wavefront_compute_endsfree_required`: with match < 0, the
+    /// begin-free cells (h,0) / (0,v) with h = v = d are reached at score
+    /// d * -match. Returns d if `score` is such a score within the free range.
+    /// (With match == 0 they are all seeded at score 0 instead.)
+    fn endsfree_begin_k(&self, score: i32) -> Option<i32> {
+        let m = self.penalties.match_;
+        if m == 0 || self.alignment_span != AlignmentSpan::EndsFree {
+            return None;
+        }
+        if self.text_begin_free == 0 && self.pattern_begin_free == 0 {
+            return None;
+        }
+        if score % (-m) != 0 {
+            return None;
+        }
+        let k = score / (-m);
+        (self.text_begin_free >= k || self.pattern_begin_free >= k).then_some(k)
+    }
+
+    /// C's `wavefront_compute_endsfree_init`: add the begin-free cells on
+    /// diagonals `k` (text) and `-k` (pattern) to a computed M-wavefront,
+    /// before its ends are trimmed.
+    fn endsfree_init(&self, wf: &mut crate::wavefront::Wavefront, k: i32) {
+        let (lo, hi) = (wf.lo, wf.hi);
+        if self.text_begin_free >= k {
+            if hi >= k {
+                if wf.get_offset(k) <= k {
+                    wf.set_offset(k, k); // (h, v) = (k, 0)
+                }
+            } else {
+                for kk in hi + 1..k {
+                    wf.set_offset(kk, OFFSET_NULL);
+                }
+                wf.set_offset(k, k);
+                wf.hi = k;
+            }
+        }
+        if self.pattern_begin_free >= k {
+            if lo <= -k {
+                if wf.get_offset(-k) <= 0 {
+                    wf.set_offset(-k, 0); // (h, v) = (0, k)
+                }
+            } else {
+                wf.set_offset(-k, 0);
+                for kk in -k + 1..lo {
+                    wf.set_offset(kk, OFFSET_NULL);
+                }
+                wf.lo = -k;
+            }
+        }
+    }
+
+    /// C's `wavefront_compute_endsfree_allocate_null`: when every input is
+    /// null on a begin-free score, M holds just the begin-free cells.
+    fn endsfree_null_m(&mut self, k: i32) -> *mut crate::wavefront::Wavefront {
+        let text = self.text_begin_free >= k;
+        let pattern = self.pattern_begin_free >= k;
+        let (lo, hi) = match (text, pattern) {
+            (true, true) => (-k, k),
+            (true, false) => (k, k),
+            (false, true) => (-k, -k),
+            (false, false) => (0, 0),
+        };
+        let hist_lo = self.wf_components.historic_min_lo;
+        let hist_hi = self.wf_components.historic_max_hi;
+        let wf_ptr = self.wavefront_slab.allocate_ptr(hist_lo, hist_hi);
+        let wf = unsafe { &mut *wf_ptr };
+        for kk in lo..=hi {
+            wf.set_offset(kk, OFFSET_NULL);
+        }
+        if text {
+            wf.set_offset(k, k);
+        }
+        if pattern {
+            wf.set_offset(-k, 0);
+        }
+        wf.set_limits(lo, hi);
+        wf_ptr
     }
 
     /// Store a null M-wavefront at `score` (edit/indel/linear), releasing any
