@@ -321,6 +321,7 @@ unsafe fn compute_affine_idm_avx2(
 #[cfg(not(target_arch = "aarch64"))]
 #[inline]
 #[allow(clippy::too_many_arguments, unsafe_op_in_unsafe_fn)]
+#[cfg_attr(target_feature = "avx2", allow(dead_code))]
 unsafe fn compute_affine_idm_scalar(
     pattern_length: i32,
     text_length: i32,

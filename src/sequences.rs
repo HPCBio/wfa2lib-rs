@@ -27,7 +27,7 @@ pub enum SequenceMode {
 
 // --- 2-bit DNA decode helpers ---
 
-const DNA_DECODE: [u8; 4] = [b'A', b'C', b'G', b'T'];
+const DNA_DECODE: [u8; 4] = *b"ACGT";
 
 /// Decode a packed 2-bit DNA sequence into ASCII bytes.
 /// Each input byte contains 4 nucleotides (2 bits each, LSB-first).

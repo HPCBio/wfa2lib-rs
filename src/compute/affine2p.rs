@@ -128,7 +128,7 @@ pub fn compute_affine2p_idm(
         {
             use std::arch::x86_64::*;
             if count >= 8 && (cfg!(target_feature = "avx2") || is_x86_feature_detected!("avx2")) {
-                unsafe {
+                {
                     let v_one = _mm256_set1_epi32(1);
                     let v_eight = _mm256_set1_epi32(8);
                     let v_null = _mm256_set1_epi32(OFFSET_NULL);
