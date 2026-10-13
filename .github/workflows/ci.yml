@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Override .cargo/config.toml's target-cpu=native: hosted runners differ
+  # in CPU, so cached dependencies built for one runner's CPU can crash
+  # (illegal instruction) on another. The AVX2 kernels are still used,
+  # chosen at run time, on runners that support it.
+  RUSTFLAGS: ""
+
+jobs:
+  # `cpu: x86-64-v3` builds Rust with AVX2 enabled at compile time, so the
+  # `cfg(target_feature = "avx2")` paths (as in `target-cpu=native` builds)
+  # are tested too; every hosted x86 runner supports v3, so the cache stays
+  # valid. `default` selects the AVX2 kernels at run time.
+  test:
+    name: Test (${{ matrix.os }}${{ matrix.cpu != 'default' && format(', {0}', matrix.cpu) || '' }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: ${{ matrix.cpu != 'default' && format('-C target-cpu={0}', matrix.cpu) || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cpu: [default]
+        include:
+          - { os: ubuntu-latest, cpu: x86-64-v3 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The reference tests and wfa_utest.sh read C's test data from
+      # ./WFA2-lib, at the commit the harness targets.
+      - name: Fetch C WFA2-lib
+        run: |
+          git clone --quiet https://github.com/smarco/WFA2-lib WFA2-lib
+          git -C WFA2-lib checkout --quiet "$(cat tests/differential/C_COMMIT)"
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --release
+      - name: Library-only build
+        run: cargo build --release --no-default-features
+      - name: Stock C unit tests
+        run: bash tests/wfa_utest.sh
+
+  # Suites run as parallel jobs; span is the longest (~15 min on Linux).
+  # Linux runs Rust's x86 AVX2 kernels, macOS (arm64) its NEON ones, so
+  # together they check that Rust gives the same output on both. macOS
+  # runners have 3 cores and 7 GB, so run.sh uses 1 job there. Linux also
+  # runs every suite with the x86-64-v3 build (see `test`).
+  differential:
+    name: Differential vs C (${{ matrix.os }}${{ matrix.cpu != 'default' && format(', {0}', matrix.cpu) || '' }}, ${{ matrix.suites }})
+    runs-on: ${{ matrix.os }}
+    # Each case also has its own timeout (run.sh TIMEOUT, 300 s).
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: ${{ matrix.cpu != 'default' && format('-C target-cpu={0}', matrix.cpu) || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cpu: [default]
+        suites: [core, span, drops, banded adaptive biwfa]
+        include:
+          - { os: ubuntu-latest, cpu: x86-64-v3, suites: core }
+          - { os: ubuntu-latest, cpu: x86-64-v3, suites: span }
+          - { os: ubuntu-latest, cpu: x86-64-v3, suites: drops }
+          - { os: ubuntu-latest, cpu: x86-64-v3, suites: banded adaptive biwfa }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # rust-cache prunes target/differential, so the C build has its own
+      # cache. Post steps run in reverse, so this one saves first.
+      - name: Cache C build
+        uses: actions/cache@v4
+        with:
+          path: target/differential/c-*
+          key: c-wfa2lib-${{ runner.os }}-${{ hashFiles('tests/differential/C_COMMIT', 'tests/differential/build_c.sh') }}
+      - name: Run harness
+        run: tests/differential/run.sh ${{ matrix.suites }}
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: differential-${{ matrix.os }}-${{ matrix.cpu }}-${{ strategy.job-index }}
+          path: target/differential/results.tsv
+          if-no-files-found: ignore
