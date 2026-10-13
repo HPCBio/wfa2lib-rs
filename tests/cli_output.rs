@@ -153,3 +153,33 @@ fn wfa_span_rejects_what_c_rejects() {
     );
     assert!(oversize.is_none());
 }
+
+#[test]
+fn ends_free_begin_gaps_match_c() {
+    // Begin gaps (P0 = 5, T0 = 3) were ignored, giving the global result.
+    // Expected outputs are from C's driver (16969b5b and 3282f83 agree).
+    let pairs = [
+        ("TTTTTACGTACGTACGT", "ACGTACGTACGT"),
+        ("ACGTACGTACGT", "GGGACGTACGTACGT"),
+        ("ACGTTCGTACGA", "CCACGTACGTACGA"),
+    ];
+    let span = "--wfa-span=ends-free,5,0,3,0";
+    // match == 0: begin-free cells seeded at score 0.
+    let lines = run("bf_m0", &pairs, &["-a", "gap-affine-wfa", span]);
+    assert_eq!(lines, ["-16\t5D12M", "-12\t3I12M", "-14\t2I4M1X7M"]);
+    let lines = run(
+        "bf_m0_s",
+        &pairs,
+        &["-a", "gap-affine-wfa", "--wfa-score-only", span],
+    );
+    assert_eq!(lines, ["0\t-", "0\t-", "-4\t-"]);
+    // match < 0: begin-free cells added as the score reaches them
+    // (global score-only would be 23, 27, 21).
+    let m = "--affine-penalties=-3,5,3,2";
+    let lines = run(
+        "bf_mneg_s",
+        &pairs,
+        &["-a", "gap-affine-wfa", m, "--wfa-score-only", span],
+    );
+    assert_eq!(lines, ["36\t-", "36\t-", "28\t-"]);
+}

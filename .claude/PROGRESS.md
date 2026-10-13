@@ -34,7 +34,7 @@ sync" below.
 | xdrop / zdrop | Not applied in end-to-end mode (#5) |
 | BiWFA + any heuristic | Heuristics ignored in BiWFA sub-aligners (#6) |
 | extension; ends-free with end gaps only | Byte-identical to C (all metrics incl. match < 0, alignment and score-only) |
-| ends-free with begin gaps (P0/T0 > 0) | Differs: begin-free gaps not implemented in the library; output equals global (#9) |
+| ends-free with begin gaps (P0/T0 > 0) | Byte-identical to C, match == 0 and match < 0, alignment / score-only / med (#9). Note: for edit/indel this includes a C bug that can emit an invalid CIGAR (known issue #18, from C `380eb31b`) |
 
 ### Upstream C sync
 
@@ -43,10 +43,19 @@ C changes after the port baseline that affect behaviour (fork issue #10):
 - [ ] 6565731 / 7ea485e (C #125): band inherited into BiWFA sub-aligners, and
   compute limits clamped to `[min_k, max_k]`. This also changes unidirectional
   banded output (#6).
-- [ ] 90582eb (C #126): don't apply ends-free begin seeding in end-to-end mode
+- [x] 90582eb (C #126): ends-free begin seeding only for ends-free span. Implemented this way in #9; the baseline's end-to-end widening was never ported
   (#9).
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and
   C++-binding commits.
+
+### Known issues kept for C parity
+
+- #18: edit/indel ends-free with begin gaps can return an invalid CIGAR
+  (C regression from `380eb31b`; upstream report pending).
+- C #102: ends-free with match < 0 can be suboptimal, depending on argument
+  order. This showed up in HPCBio/dada2-rs#51. Note that dada2-rs's
+  "free leading end-gap not credited" failure mode was the Rust #9 bug,
+  fixed by #17.
 
 ### Upstream Rust (COMBINE-lab/wfa2lib-rs) PRs
 

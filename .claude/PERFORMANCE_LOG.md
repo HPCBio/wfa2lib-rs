@@ -107,3 +107,20 @@ library: it reads the whole input file (about 100 MB here) into memory and
 buffers all output lines, while C streams. It fails PLAN's "memory within 1.5x"
 target as measured. Tracked as a CLI gap (HPCBio/wfa2lib-rs#8). Library-level
 memory should be measured separately, without CLI buffering.
+
+### 2026-10-12 — `6a06d8f` (#9 ends-free begin gaps) vs `eee854b` (main)
+
+End-to-end, same machine and data, Rust only (minimum of 3 runs, ms):
+
+| Mode | `eee854b` | `6a06d8f` |
+|---|---|---|
+| Edit score | 220 | 201 |
+| Linear score | 321 | 324 |
+| Affine score | 1939 | 1937 |
+| Affine CIGAR | 2074 | 2070 |
+| Affine2p score | 7420 | 7416 |
+
+No regression from the per-step begin-free check. Edit is about 8% faster,
+plausibly because the edit step now writes C's four boundary NULLs directly
+instead of calling `init_ends`.
+
