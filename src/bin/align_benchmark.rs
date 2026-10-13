@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -76,30 +76,61 @@ struct Cli {
     verbose: Option<i32>,
 }
 
-fn parse_sequences(path: &PathBuf) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let content = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Error reading input file {:?}: {}", path, e);
-        std::process::exit(1);
-    });
-    let lines: Vec<&str> = content.lines().collect();
-    let mut pairs = Vec::new();
-    for chunk in lines.chunks(2) {
-        if chunk.len() < 2 {
-            break;
+/// Streams pattern/text pairs from a `.seq` file (alternating `>pattern` and
+/// `<text` lines; the prefixes are optional), reusing two line buffers so
+/// memory stays proportional to one pair, as C's driver reads its input.
+struct PairReader {
+    reader: BufReader<fs::File>,
+    pattern: String,
+    text: String,
+}
+
+impl PairReader {
+    fn open(path: &PathBuf) -> Self {
+        let file = fs::File::open(path).unwrap_or_else(|e| {
+            eprintln!("Error reading input file {:?}: {}", path, e);
+            std::process::exit(1);
+        });
+        Self {
+            reader: BufReader::new(file),
+            pattern: String::new(),
+            text: String::new(),
         }
-        let pattern = chunk[0]
-            .strip_prefix('>')
-            .unwrap_or(chunk[0])
-            .as_bytes()
-            .to_vec();
-        let text = chunk[1]
-            .strip_prefix('<')
-            .unwrap_or(chunk[1])
-            .as_bytes()
-            .to_vec();
-        pairs.push((pattern, text));
     }
-    pairs
+
+    /// Next (pattern, text), or `None` at end of input (an unpaired last
+    /// line is ignored).
+    fn next_pair(&mut self) -> Option<(&[u8], &[u8])> {
+        if !read_line(&mut self.reader, &mut self.pattern)
+            || !read_line(&mut self.reader, &mut self.text)
+        {
+            return None;
+        }
+        let pattern = self.pattern.strip_prefix('>').unwrap_or(&self.pattern);
+        let text = self.text.strip_prefix('<').unwrap_or(&self.text);
+        Some((pattern.as_bytes(), text.as_bytes()))
+    }
+}
+
+/// Reads one line into `buf` without its `\n` / `\r\n` terminator; false at EOF.
+fn read_line(reader: &mut BufReader<fs::File>, buf: &mut String) -> bool {
+    buf.clear();
+    match reader.read_line(buf) {
+        Ok(0) => false,
+        Ok(_) => {
+            if buf.ends_with('\n') {
+                buf.pop();
+                if buf.ends_with('\r') {
+                    buf.pop();
+                }
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("Error reading input file: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn parse_penalty_values(s: &str) -> Vec<i32> {
@@ -420,7 +451,7 @@ fn compute_output_score(
 
 fn main() {
     let cli = Cli::parse();
-    let pairs = parse_sequences(&cli.input);
+    let mut pairs = PairReader::open(&cli.input);
     let penalties = build_penalties(&cli);
     let score_only = cli.wfa_score_only;
     let use_biwfa = cli.wfa_memory.as_deref() == Some("ultralow");
@@ -464,13 +495,24 @@ fn main() {
         aligner.set_alignment_extension();
     }
 
-    let mut output_lines: Vec<String> = Vec::with_capacity(pairs.len());
+    // Results are written as they are computed (as C's driver does) rather
+    // than buffered until the end.
+    let mut out: Box<dyn Write> = match cli.output {
+        Some(ref output_path) => Box::new(BufWriter::new(
+            fs::File::create(output_path).unwrap_or_else(|e| {
+                eprintln!("Error creating output file {:?}: {}", output_path, e);
+                std::process::exit(1);
+            }),
+        )),
+        None => Box::new(BufWriter::new(io::stdout().lock())),
+    };
     let mut correct_count = 0u32;
-    let total = pairs.len() as u32;
+    let mut total = 0u32;
 
     let mut align_nanos: u64 = 0;
 
-    for (pattern, text) in &pairs {
+    while let Some((pattern, text)) = pairs.next_pair() {
+        total += 1;
         let t0 = std::time::Instant::now();
         let wfa_score = match span {
             Span::Global if use_biwfa && !score_only => aligner.align_biwfa(pattern, text),
@@ -495,6 +537,8 @@ fn main() {
                          where (|P|,|T|)=({plen},{tlen})",
                         ends[0], ends[1], ends[2], ends[3]
                     );
+                    // C's exit() flushes earlier results; process::exit does not.
+                    let _ = out.flush();
                     std::process::exit(1);
                 }
                 aligner.set_alignment_free_ends(ends[0], ends[1], ends[2], ends[3]);
@@ -522,7 +566,10 @@ fn main() {
             aligner.cigar().to_string_rle(true)
         };
 
-        output_lines.push(format!("{}\t{}", output_score, cigar_str));
+        writeln!(out, "{}\t{}", output_score, cigar_str).unwrap_or_else(|e| {
+            eprintln!("Error writing output: {}", e);
+            std::process::exit(1);
+        });
 
         if do_check && !score_only {
             match aligner.cigar().check_alignment(pattern, text) {
@@ -544,20 +591,10 @@ fn main() {
         align_ms * 1000.0 / total as f64
     );
 
-    // Write output
-    if let Some(ref output_path) = cli.output {
-        let mut f = fs::File::create(output_path).unwrap_or_else(|e| {
-            eprintln!("Error creating output file {:?}: {}", output_path, e);
-            std::process::exit(1);
-        });
-        for line in &output_lines {
-            writeln!(f, "{}", line).unwrap();
-        }
-    } else {
-        for line in &output_lines {
-            println!("{}", line);
-        }
-    }
+    out.flush().unwrap_or_else(|e| {
+        eprintln!("Error writing output: {}", e);
+        std::process::exit(1);
+    });
 
     // Print check results
     if do_check {

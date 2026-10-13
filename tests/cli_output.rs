@@ -251,3 +251,21 @@ fn drops_reject_what_c_rejects() {
     );
     assert!(one_param.is_none());
 }
+
+#[test]
+fn streams_to_stdout_and_keeps_results_written_before_an_error() {
+    // Without -o, results go to stdout. Output is streamed as in C's driver,
+    // so results written before an error exit (here: the second pair's
+    // ends-free parameters exceed its length) are kept, as with C's exit().
+    let input = std::env::temp_dir().join(format!("wfa2_cli_stream_{}.seq", std::process::id()));
+    fs::write(&input, ">ACGTACGTAC\n<ACGTACGTACGGAAA\n>ACGT\n<ACG\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_align_benchmark"))
+        .arg("-i")
+        .arg(&input)
+        .args(["-a", "gap-affine-wfa", "--wfa-span=ends-free,0,0,0,5"])
+        .output()
+        .expect("failed to run align_benchmark");
+    let _ = fs::remove_file(&input);
+    assert!(!out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "-16\t10M5I\n");
+}
