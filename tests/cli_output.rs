@@ -314,3 +314,30 @@ fn biwfa_heuristics_match_c() {
         ["539\t-", "589\t-"]
     );
 }
+
+#[test]
+fn biwfa_match_reward_tie_breaks_match_c() {
+    // wfa.utest.seq pair 298. Sub-problems of at most 100 bp used to fall back
+    // to unidirectional WFA at every level; C checks the length only at the
+    // top level, which can pick a different co-optimal CIGAR (here 3D1X
+    // instead of 1X3D). Expected output from C's driver (3282f83).
+    let lines = run(
+        "bi_tie",
+        &[(
+            "AATGCCTCGGCTTCAGTAAGCAATGCCGGCCGTTTAACTGGTATGAAGAAATGATAGCTCGAGACTAAAGAGGGGGAACCTGGTTTTAAGGGCTAAACACTTGGG",
+            "AAGCTTTCGTTCGGTGAAACTTGTTGCGTGGTTACGACAGAAATGACGAGATCGTCCATAGCAGGCAGGACTAGGTGACGGCGTACACCAGACGGTAGGT",
+        )],
+        &[
+            "-a",
+            "gap-affine-wfa",
+            "--affine-penalties=-3,5,3,2",
+            "--wfa-memory=ultralow",
+        ],
+    );
+    assert_eq!(
+        lines,
+        [
+            "-3\t2M1D2M1X1M1I2M2D3M1X2M2D1M1X2M2I2M2X1M2D3M6D3M1I1M1X2M1I8M5D5M1I1M1I1M2I1M1X2M1I3M1I1X3M2D2M1I3M1X3D1M1X3M1I2M1X2M3I2M2I1M1X2M1X"
+        ]
+    );
+}

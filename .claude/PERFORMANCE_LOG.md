@@ -164,3 +164,21 @@ Max RSS (`/usr/bin/time -l`), 50,000 × 1 kb, same machine. "main" is
   its `lo..hi` (plus margins). That likely explains most of the affine CIGAR
   gap (10.7 vs 4.3 MB) against PLAN's "memory within 1.5x" target.
 
+
+### 2026-10-13 — `feat/biwfa-heuristics-banded` vs `6031aa7` (main)
+
+Same machine and data, Rust only, minimum of 3 runs (ms). Covers
+banded-adaptive, smarco/WFA2-lib#125's band clamp with 1000 × 1000 initial
+components, BiWFA heuristic/status handling, and the top-level-only BiWFA length
+fallback (HPCBio/wfa2lib-rs#6, HPCBio/wfa2lib-rs#7):
+
+| Mode | `6031aa7` | branch | Δ |
+|---|---|---|---|
+| Edit score | 200 | 199 | -0.5% |
+| Affine score | 1919 | 1930 | +0.6% |
+| Affine CIGAR | 2071 | 2082 | +0.5% |
+| BiWFA (ultralow) | 3313 | 3357 | +1.3% |
+| Affine2p score | 7636 | 7732 | +1.3% |
+
+No measurable regression (within ~1.5%). Recursing to deeper BiWFA levels
+instead of falling back at 100 bp costs about 1% on BiWFA.

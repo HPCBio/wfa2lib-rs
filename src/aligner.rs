@@ -2,7 +2,8 @@
 
 use crate::backtrace;
 use crate::bialign::{
-    self, BIALIGN_FALLBACK_MIN_SCORE, BIALIGN_RECOVERY_MIN_SCORE, BiAlignBreakpoint, ComponentType,
+    self, BIALIGN_FALLBACK_MIN_LENGTH, BIALIGN_FALLBACK_MIN_SCORE, BIALIGN_RECOVERY_MIN_SCORE,
+    BiAlignBreakpoint, ComponentType,
 };
 use crate::cigar::Cigar;
 use crate::components::WavefrontComponents;
@@ -1566,7 +1567,13 @@ impl<const N: usize> WavefrontAligner<N> {
             tlen,
             ComponentType::M,
             ComponentType::M,
-            i32::MAX,
+            // As C, short sequences go straight to unidirectional WFA; the
+            // length check applies only at the top level.
+            if plen.max(tlen) <= BIALIGN_FALLBACK_MIN_LENGTH {
+                0
+            } else {
+                i32::MAX
+            },
             0,
         );
 
@@ -1760,8 +1767,7 @@ impl<const N: usize> WavefrontAligner<N> {
             return Ok(0);
         }
 
-        // Fallback to standard WFA for small subproblems
-        const MIN_LENGTH: i32 = 100;
+        // Fallback to standard WFA for low-score subproblems
         let fallback = |cigar: &mut Cigar, base: &mut WavefrontAligner<N>| {
             Self::bialign_base(
                 cigar,
@@ -1777,7 +1783,7 @@ impl<const N: usize> WavefrontAligner<N> {
                 component_end,
             )
         };
-        if score_remaining <= BIALIGN_FALLBACK_MIN_SCORE || plen.max(tlen) <= MIN_LENGTH {
+        if score_remaining <= BIALIGN_FALLBACK_MIN_SCORE {
             return fallback(cigar, base);
         }
 

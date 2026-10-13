@@ -247,7 +247,7 @@ banded path crashes.
 6. [x] HPCBio/wfa2lib-rs#5 X-drop / Z-drop: C heuristics, Z-drop partial alignments, ported C affine backtrace, null-step counting in compute (`a3a4c4f`, `763ed8a`, `f4eb349`)
 7. [x] HPCBio/wfa2lib-rs#6 BiWFA heuristics; banded-adaptive as in C; port smarco/WFA2-lib#125 (`19eac8b`, `3b16283`, BiWFA statuses/heuristics)
 8. [x] HPCBio/wfa2lib-rs#9 Ends-free begin-free gaps: `match == 0` initial M seeding over `[-P0, T0]` (`28cb857`) and the `match != 0` path, `wavefront_compute_endsfree_*` (`6a06d8f`); smarco/WFA2-lib#126 semantics
-9. [ ] HPCBio/wfa2lib-rs#7 BiWFA tie-breaking with match < 0
+9. [x] HPCBio/wfa2lib-rs#7 BiWFA tie-breaking with match < 0 (length fallback at the top level only, as C)
 
 **Per-change validation:**
 - stock `wfa.utest.sh`;

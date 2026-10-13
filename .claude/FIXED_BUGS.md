@@ -251,9 +251,24 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   rejects a band edge of −1 (e.g. `-1,1`). Rust accepts it.
 - **Result:** BiWFA × {none, banded-static, banded-adaptive, xdrop, zdrop,
   wfa-adaptive} × {edit, linear, affine, affine match < 0, affine2p} ×
-  {CIGAR, score-only} × {utest, long}: byte-identical to C 3282f83 except
-  match < 0 CIGARs, which already differed without heuristics
-  (HPCBio/wfa2lib-rs#7). Before the fix, every heuristic run diverged.
+  {CIGAR, score-only} × {utest, long}: 168/168 byte-identical to C 3282f83.
+  Before the fix, every heuristic run diverged.
 - **Tests:** `tests/cli_output.rs::biwfa_heuristics_match_c`,
   `aligner::tests::{test_biwfa_band_excluding_end_is_unreachable,
   test_biwfa_score_matches_end2end}`.
+
+## 9. BiWFA tie-breaks with match < 0 (HPCBio/wfa2lib-rs#7)
+
+- **Symptom:** 3 stock `wfa.utest.sh` BiWFA cases with match < 0 gave a
+  different co-optimal CIGAR than C (same score).
+- **Root cause:** Rust fell back to unidirectional WFA for any sub-problem of
+  at most 100 bp, at every recursion level. In C,
+  `WF_BIALIGN_FALLBACK_MIN_LENGTH` applies only at the top level; deeper
+  levels fall back only by score (`score_remaining <= 250`). Splitting at
+  different points can pick different co-optimal paths.
+- **Fix:** check the length only at the top level, as C does.
+- **Result:** stock `wfa.utest.sh` 60/60 identical (was 57/60, the other 3
+  matching by score only). BiWFA match < 0 is now byte-identical to C on utest
+  and long, with and without heuristics.
+- **Test:** `tests/cli_output.rs::biwfa_match_reward_tie_breaks_match_c`
+  (`wfa.utest.seq` pair 298).
