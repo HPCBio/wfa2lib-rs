@@ -106,7 +106,15 @@ fn bt_del1_open<const N: usize>(
 /// Write `num_matches` 'M' operations into the CIGAR (backwards).
 #[inline(always)]
 fn write_matches(cigar: &mut Cigar, num_matches: i32) {
-    if num_matches <= 0 {
+    if num_matches < 0 {
+        // Only reachable from a corrupted backtrace (X-drop with
+        // steps_between_cutoffs > 1, a C bug kept for parity). C's
+        // `wavefront_backtrace_matches` still does `begin_offset -= num_matches`,
+        // discarding the last |num_matches| operations written; do the same.
+        cigar.begin_offset += num_matches.unsigned_abs() as usize;
+        return;
+    }
+    if num_matches == 0 {
         return;
     }
     let n = num_matches as usize;
@@ -250,42 +258,6 @@ pub fn backtrace_linear<const N: usize>(
 
 // --- Affine backtrace helpers ---
 
-/// Look up I1-wavefront at (score, k): returns piggyback(offset, BT_I1_EXT).
-#[inline(always)]
-fn bt_i1_ext<const N: usize>(wf_components: &WavefrontComponents<N>, score: i32, k: i32) -> i64 {
-    if score < 0 {
-        return OFFSET_NULL as i64;
-    }
-    let i1_ptr = wf_components.get_i1_ptr(score as usize);
-    if i1_ptr.is_null() {
-        return OFFSET_NULL as i64;
-    }
-    let wf = unsafe { &*i1_ptr };
-    if wf.wf_elements_init_min <= k && k <= wf.wf_elements_init_max {
-        piggyback_set(wf.get_offset(k), BT_I1_EXT)
-    } else {
-        OFFSET_NULL as i64
-    }
-}
-
-/// Look up D1-wavefront at (score, k): returns piggyback(offset, BT_D1_EXT).
-#[inline(always)]
-fn bt_d1_ext<const N: usize>(wf_components: &WavefrontComponents<N>, score: i32, k: i32) -> i64 {
-    if score < 0 {
-        return OFFSET_NULL as i64;
-    }
-    let d1_ptr = wf_components.get_d1_ptr(score as usize);
-    if d1_ptr.is_null() {
-        return OFFSET_NULL as i64;
-    }
-    let wf = unsafe { &*d1_ptr };
-    if wf.wf_elements_init_min <= k && k <= wf.wf_elements_init_max {
-        piggyback_set(wf.get_offset(k), BT_D1_EXT)
-    } else {
-        OFFSET_NULL as i64
-    }
-}
-
 /// Look up both M→I1 open (k-1, offset+1) and M→D1 open (k+1, offset) from
 /// the same M-wavefront at the given score. Returns (ins1_open, del1_open).
 /// This avoids a redundant double-fetch.
@@ -383,228 +355,21 @@ pub fn backtrace_affine<const N: usize>(
     component_end: ComponentType,
     cigar: &mut Cigar,
 ) {
-    // Prepare cigar — write backwards from the end of the buffer
-    let max_ops = cigar.operations.len();
-    cigar.end_offset = max_ops;
-    cigar.begin_offset = max_ops - 1;
-
-    let mut score = alignment_score;
-    let mut k = alignment_k;
-    let mut offset = alignment_offset;
-    let mut v = wavefront_v(k, offset);
-    let mut h = wavefront_h(k, offset);
-
-    // Account for ending insertions/deletions (ends-free, only when ending in M)
-    if component_end == ComponentType::M {
-        if v < pattern_length {
-            for _ in 0..(pattern_length - v) {
-                cigar.operations[cigar.begin_offset] = b'D';
-                cigar.begin_offset -= 1;
-            }
-        }
-        if h < text_length {
-            for _ in 0..(text_length - h) {
-                cigar.operations[cigar.begin_offset] = b'I';
-                cigar.begin_offset -= 1;
-            }
-        }
-    }
-
-    // Penalty shortcuts
-    let x = penalties.mismatch;
-    let o_plus_e = penalties.gap_opening1 + penalties.gap_extension1;
-    let e = penalties.gap_extension1;
-
-    // State machine: start in component_end matrix
-    // 0 = M, 1 = I1, 2 = D1
-    let mut matrix = match component_end {
-        ComponentType::M => 0u8,
-        ComponentType::I1 => 1u8,
-        ComponentType::D1 => 2u8,
-        _ => 0u8,
-    };
-
-    // Main backtrace loop
-    while v > 0 && h > 0 && score > 0 {
-        match matrix {
-            0 => {
-                // In M-matrix: predecessors are mismatch, I1→M, D1→M
-                let misms = bt_misms(wf_components, score - x, k);
-                let ins_from_i1 = bt_i1_ext(wf_components, score, k);
-                let del_from_d1 = bt_d1_ext(wf_components, score, k);
-
-                let max_all = misms.max(ins_from_i1.max(del_from_d1));
-
-                if max_all < 0 {
-                    break;
-                }
-
-                let max_offset = piggyback_get_offset(max_all);
-                let num_matches = offset - max_offset;
-                write_matches(cigar, num_matches);
-                offset = max_offset;
-
-                v = wavefront_v(k, offset);
-                h = wavefront_h(k, offset);
-                if v <= 0 || h <= 0 {
-                    break;
-                }
-
-                let bt_type = piggyback_get_type(max_all);
-                match bt_type {
-                    BT_M => {
-                        // Mismatch: stay in M, emit X
-                        score -= x;
-                        cigar.operations[cigar.begin_offset] = b'X';
-                        cigar.begin_offset -= 1;
-                        offset -= 1;
-                    }
-                    BT_I1_EXT => {
-                        // Came from I1: transition to I1 state
-                        matrix = 1;
-                    }
-                    BT_D1_EXT => {
-                        // Came from D1: transition to D1 state
-                        matrix = 2;
-                    }
-                    _ => panic!("Invalid backtrace type in M-state: {}", bt_type),
-                }
-            }
-            1 => {
-                // In I1-matrix: predecessors are gap open (M→I1) or gap extend (I1→I1)
-                // bt_open1_pair fetches M-wavefront once for both ins_open and del_open
-                let (ins_open, _) = bt_open1_pair(wf_components, score - o_plus_e, k);
-                let ins_ext = bt_affine_ins1_ext(wf_components, score - e, k);
-
-                let max_all = ins_open.max(ins_ext);
-
-                if max_all < 0 {
-                    break;
-                }
-
-                // Emit 'I' operation
-                cigar.operations[cigar.begin_offset] = b'I';
-                cigar.begin_offset -= 1;
-
-                let bt_type = piggyback_get_type(max_all);
-                // Insertion: undo the k-1 shift and offset+1 from forward pass
-                k -= 1;
-                offset -= 1;
-
-                match bt_type {
-                    BT_I1_OPEN => {
-                        // Gap open: transition back to M
-                        score -= o_plus_e;
-                        matrix = 0;
-                    }
-                    BT_I1_EXT => {
-                        // Gap extend: stay in I1
-                        score -= e;
-                    }
-                    _ => panic!("Invalid backtrace type in I1-state: {}", bt_type),
-                }
-            }
-            2 => {
-                // In D1-matrix: predecessors are gap open (M→D1) or gap extend (D1→D1)
-                let (_, del_open) = bt_open1_pair(wf_components, score - o_plus_e, k);
-                let del_ext = bt_affine_del1_ext(wf_components, score - e, k);
-
-                let max_all = del_open.max(del_ext);
-
-                if max_all < 0 {
-                    break;
-                }
-
-                // Emit 'D' operation
-                cigar.operations[cigar.begin_offset] = b'D';
-                cigar.begin_offset -= 1;
-
-                let bt_type = piggyback_get_type(max_all);
-                // Deletion: undo the k+1 shift (offset unchanged in forward pass)
-                k += 1;
-
-                match bt_type {
-                    BT_D1_OPEN => {
-                        // Gap open: transition back to M
-                        score -= o_plus_e;
-                        matrix = 0;
-                    }
-                    BT_D1_EXT => {
-                        // Gap extend: stay in D1
-                        score -= e;
-                    }
-                    _ => panic!("Invalid backtrace type in D1-state: {}", bt_type),
-                }
-            }
-            _ => unreachable!(),
-        }
-
-        v = wavefront_v(k, offset);
-        h = wavefront_h(k, offset);
-    }
-
-    // Account for beginning matches (only when beginning in M)
-    if component_begin == ComponentType::M && v > 0 && h > 0 {
-        let num_matches = v.min(h);
-        write_matches(cigar, num_matches);
-        v -= num_matches;
-        h -= num_matches;
-    }
-
-    // Account for beginning insertions/deletions (always emit remaining I/D)
-    while v > 0 {
-        cigar.operations[cigar.begin_offset] = b'D';
-        cigar.begin_offset -= 1;
-        v -= 1;
-    }
-    while h > 0 {
-        cigar.operations[cigar.begin_offset] = b'I';
-        cigar.begin_offset -= 1;
-        h -= 1;
-    }
-
-    // Adjust to point to first valid operation
-    cigar.begin_offset += 1;
-    cigar.score = alignment_score;
+    let _ = component_begin; // C's backtrace does not use it
+    backtrace_affine_c(
+        wf_components,
+        penalties,
+        pattern_length,
+        text_length,
+        alignment_score,
+        alignment_k,
+        alignment_offset,
+        component_end,
+        cigar,
+    );
 }
 
 // --- Affine2p backtrace helpers ---
-
-/// Look up I2-wavefront at (score, k): returns piggyback(offset, BT_I2_EXT).
-#[inline(always)]
-fn bt_i2_ext<const N: usize>(wf_components: &WavefrontComponents<N>, score: i32, k: i32) -> i64 {
-    if score < 0 {
-        return OFFSET_NULL as i64;
-    }
-    let i2_ptr = wf_components.get_i2_ptr(score as usize);
-    if i2_ptr.is_null() {
-        return OFFSET_NULL as i64;
-    }
-    let wf = unsafe { &*i2_ptr };
-    if wf.wf_elements_init_min <= k && k <= wf.wf_elements_init_max {
-        piggyback_set(wf.get_offset(k), BT_I2_EXT)
-    } else {
-        OFFSET_NULL as i64
-    }
-}
-
-/// Look up D2-wavefront at (score, k): returns piggyback(offset, BT_D2_EXT).
-#[inline(always)]
-fn bt_d2_ext<const N: usize>(wf_components: &WavefrontComponents<N>, score: i32, k: i32) -> i64 {
-    if score < 0 {
-        return OFFSET_NULL as i64;
-    }
-    let d2_ptr = wf_components.get_d2_ptr(score as usize);
-    if d2_ptr.is_null() {
-        return OFFSET_NULL as i64;
-    }
-    let wf = unsafe { &*d2_ptr };
-    if wf.wf_elements_init_min <= k && k <= wf.wf_elements_init_max {
-        piggyback_set(wf.get_offset(k), BT_D2_EXT)
-    } else {
-        OFFSET_NULL as i64
-    }
-}
 
 /// Look up both M→I2 open (k-1, offset+1) and M→D2 open (k+1, offset) from
 /// the same M-wavefront at the given score. Returns (ins2_open, del2_open).
@@ -699,239 +464,168 @@ pub fn backtrace_affine2p<const N: usize>(
     component_end: ComponentType,
     cigar: &mut Cigar,
 ) {
+    let _ = component_begin; // C's backtrace does not use it
+    backtrace_affine_c(
+        wf_components,
+        penalties,
+        pattern_length,
+        text_length,
+        alignment_score,
+        alignment_k,
+        alignment_offset,
+        component_end,
+        cigar,
+    );
+}
+
+/// Backtrace for gap-affine and gap-affine 2-piece, ported from C's
+/// `wavefront_backtrace_affine` so tie-breaking and boundary behaviour match.
+///
+/// In the M state every predecessor is read from its *source* wavefront:
+/// mismatch (M at s-x), gap open (M at s-o-e, k∓1) and gap extend (I/D at
+/// s-e, k∓1), taking the maximum packed (offset, type). Reading the stored
+/// I/D cell at score s instead can miss sources when heuristics narrowed the
+/// computed range. Leading matches/indels are added only if the trace ends
+/// in M (as C).
+#[allow(clippy::too_many_arguments)]
+fn backtrace_affine_c<const N: usize>(
+    wf_components: &WavefrontComponents<N>,
+    penalties: &WavefrontPenalties,
+    pattern_length: i32,
+    text_length: i32,
+    alignment_score: i32,
+    alignment_k: i32,
+    alignment_offset: i32,
+    component_end: ComponentType,
+    cigar: &mut Cigar,
+) {
+    let two_piece = penalties.distance_metric == DistanceMetric::GapAffine2p;
+    let push = |cigar: &mut Cigar, op: u8| {
+        cigar.operations[cigar.begin_offset] = op;
+        cigar.begin_offset -= 1;
+    };
+
     // Prepare cigar — write backwards from the end of the buffer
     let max_ops = cigar.operations.len();
     cigar.end_offset = max_ops;
     cigar.begin_offset = max_ops - 1;
 
+    let mut matrix = component_end;
     let mut score = alignment_score;
     let mut k = alignment_k;
     let mut offset = alignment_offset;
     let mut v = wavefront_v(k, offset);
     let mut h = wavefront_h(k, offset);
 
-    // Account for ending insertions/deletions (ends-free, only when ending in M)
+    // Account for ending insertions/deletions (ends-free)
     if component_end == ComponentType::M {
-        if v < pattern_length {
-            for _ in 0..(pattern_length - v) {
-                cigar.operations[cigar.begin_offset] = b'D';
-                cigar.begin_offset -= 1;
-            }
+        for _ in 0..(pattern_length - v).max(0) {
+            push(cigar, b'D');
         }
-        if h < text_length {
-            for _ in 0..(text_length - h) {
-                cigar.operations[cigar.begin_offset] = b'I';
-                cigar.begin_offset -= 1;
-            }
+        for _ in 0..(text_length - h).max(0) {
+            push(cigar, b'I');
         }
     }
 
-    // Penalty shortcuts
-    let x = penalties.mismatch;
-    let o1_plus_e1 = penalties.gap_opening1 + penalties.gap_extension1;
-    let e1 = penalties.gap_extension1;
-    let o2_plus_e2 = penalties.gap_opening2 + penalties.gap_extension2;
-    let e2 = penalties.gap_extension2;
-
-    // State machine: 0=M, 1=I1, 2=D1, 3=I2, 4=D2
-    let mut matrix = match component_end {
-        ComponentType::M => 0u8,
-        ComponentType::I1 => 1u8,
-        ComponentType::D1 => 2u8,
-        ComponentType::I2 => 3u8,
-        ComponentType::D2 => 4u8,
-    };
-
-    // Main backtrace loop
     while v > 0 && h > 0 && score > 0 {
-        match matrix {
-            0 => {
-                // M-state: predecessors are mismatch, I1→M, D1→M, I2→M, D2→M
-                let misms = bt_misms(wf_components, score - x, k);
-                let ins_from_i1 = bt_i1_ext(wf_components, score, k);
-                let del_from_d1 = bt_d1_ext(wf_components, score, k);
-                let ins_from_i2 = bt_i2_ext(wf_components, score, k);
-                let del_from_d2 = bt_d2_ext(wf_components, score, k);
-
-                let max_all = misms
-                    .max(ins_from_i1)
-                    .max(del_from_d1)
-                    .max(ins_from_i2)
-                    .max(del_from_d2);
-
-                if max_all < 0 {
-                    break;
-                }
-
-                let max_offset = piggyback_get_offset(max_all);
-                let num_matches = offset - max_offset;
-                write_matches(cigar, num_matches);
-                offset = max_offset;
-
-                v = wavefront_v(k, offset);
-                h = wavefront_h(k, offset);
-                if v <= 0 || h <= 0 {
-                    break;
-                }
-
-                let bt_type = piggyback_get_type(max_all);
-                match bt_type {
-                    BT_M => {
-                        score -= x;
-                        cigar.operations[cigar.begin_offset] = b'X';
-                        cigar.begin_offset -= 1;
-                        offset -= 1;
-                    }
-                    BT_I1_EXT => {
-                        matrix = 1;
-                    }
-                    BT_D1_EXT => {
-                        matrix = 2;
-                    }
-                    BT_I2_EXT => {
-                        matrix = 3;
-                    }
-                    BT_D2_EXT => {
-                        matrix = 4;
-                    }
-                    _ => panic!("Invalid backtrace type in M-state: {}", bt_type),
+        let mismatch = score - penalties.mismatch;
+        let gap_open1 = score - penalties.gap_opening1 - penalties.gap_extension1;
+        let gap_open2 = score - penalties.gap_opening2 - penalties.gap_extension2;
+        let gap_extend1 = score - penalties.gap_extension1;
+        let gap_extend2 = score - penalties.gap_extension2;
+        let max_all = match matrix {
+            ComponentType::M => {
+                let misms = bt_misms(wf_components, mismatch, k);
+                let (ins1_open, del1_open) = bt_open1_pair(wf_components, gap_open1, k);
+                let max_ins1 = ins1_open.max(bt_affine_ins1_ext(wf_components, gap_extend1, k));
+                let max_del1 = del1_open.max(bt_affine_del1_ext(wf_components, gap_extend1, k));
+                if two_piece {
+                    let (ins2_open, del2_open) = bt_open2_pair(wf_components, gap_open2, k);
+                    let max_ins2 = ins2_open.max(bt_affine_ins2_ext(wf_components, gap_extend2, k));
+                    let max_del2 = del2_open.max(bt_affine_del2_ext(wf_components, gap_extend2, k));
+                    misms.max(max_ins1.max(max_ins2).max(max_del1.max(max_del2)))
+                } else {
+                    misms.max(max_ins1.max(max_del1))
                 }
             }
-            1 => {
-                // I1-state: gap open (M→I1) or gap extend (I1→I1)
-                let (ins_open, _) = bt_open1_pair(wf_components, score - o1_plus_e1, k);
-                let ins_ext = bt_affine_ins1_ext(wf_components, score - e1, k);
-
-                let max_all = ins_open.max(ins_ext);
-                if max_all < 0 {
-                    break;
-                }
-
-                cigar.operations[cigar.begin_offset] = b'I';
-                cigar.begin_offset -= 1;
-
-                let bt_type = piggyback_get_type(max_all);
-                k -= 1;
-                offset -= 1;
-
-                match bt_type {
-                    BT_I1_OPEN => {
-                        score -= o1_plus_e1;
-                        matrix = 0;
-                    }
-                    BT_I1_EXT => {
-                        score -= e1;
-                    }
-                    _ => panic!("Invalid backtrace type in I1-state: {}", bt_type),
-                }
-            }
-            2 => {
-                // D1-state: gap open (M→D1) or gap extend (D1→D1)
-                let (_, del_open) = bt_open1_pair(wf_components, score - o1_plus_e1, k);
-                let del_ext = bt_affine_del1_ext(wf_components, score - e1, k);
-
-                let max_all = del_open.max(del_ext);
-                if max_all < 0 {
-                    break;
-                }
-
-                cigar.operations[cigar.begin_offset] = b'D';
-                cigar.begin_offset -= 1;
-
-                let bt_type = piggyback_get_type(max_all);
-                k += 1;
-
-                match bt_type {
-                    BT_D1_OPEN => {
-                        score -= o1_plus_e1;
-                        matrix = 0;
-                    }
-                    BT_D1_EXT => {
-                        score -= e1;
-                    }
-                    _ => panic!("Invalid backtrace type in D1-state: {}", bt_type),
-                }
-            }
-            3 => {
-                // I2-state: gap open (M→I2) or gap extend (I2→I2)
-                let (ins_open, _) = bt_open2_pair(wf_components, score - o2_plus_e2, k);
-                let ins_ext = bt_affine_ins2_ext(wf_components, score - e2, k);
-
-                let max_all = ins_open.max(ins_ext);
-                if max_all < 0 {
-                    break;
-                }
-
-                cigar.operations[cigar.begin_offset] = b'I';
-                cigar.begin_offset -= 1;
-
-                let bt_type = piggyback_get_type(max_all);
-                k -= 1;
-                offset -= 1;
-
-                match bt_type {
-                    BT_I2_OPEN => {
-                        score -= o2_plus_e2;
-                        matrix = 0;
-                    }
-                    BT_I2_EXT => {
-                        score -= e2;
-                    }
-                    _ => panic!("Invalid backtrace type in I2-state: {}", bt_type),
-                }
-            }
-            4 => {
-                // D2-state: gap open (M→D2) or gap extend (D2→D2)
-                let (_, del_open) = bt_open2_pair(wf_components, score - o2_plus_e2, k);
-                let del_ext = bt_affine_del2_ext(wf_components, score - e2, k);
-
-                let max_all = del_open.max(del_ext);
-                if max_all < 0 {
-                    break;
-                }
-
-                cigar.operations[cigar.begin_offset] = b'D';
-                cigar.begin_offset -= 1;
-
-                let bt_type = piggyback_get_type(max_all);
-                k += 1;
-
-                match bt_type {
-                    BT_D2_OPEN => {
-                        score -= o2_plus_e2;
-                        matrix = 0;
-                    }
-                    BT_D2_EXT => {
-                        score -= e2;
-                    }
-                    _ => panic!("Invalid backtrace type in D2-state: {}", bt_type),
-                }
-            }
-            _ => unreachable!(),
+            ComponentType::I1 => bt_open1_pair(wf_components, gap_open1, k)
+                .0
+                .max(bt_affine_ins1_ext(wf_components, gap_extend1, k)),
+            ComponentType::D1 => bt_open1_pair(wf_components, gap_open1, k)
+                .1
+                .max(bt_affine_del1_ext(wf_components, gap_extend1, k)),
+            ComponentType::I2 => bt_open2_pair(wf_components, gap_open2, k)
+                .0
+                .max(bt_affine_ins2_ext(wf_components, gap_extend2, k)),
+            ComponentType::D2 => bt_open2_pair(wf_components, gap_open2, k)
+                .1
+                .max(bt_affine_del2_ext(wf_components, gap_extend2, k)),
+        };
+        if max_all < 0 {
+            break; // No source
         }
-
+        // Traceback matches
+        if matrix == ComponentType::M {
+            let max_offset = piggyback_get_offset(max_all);
+            write_matches(cigar, offset - max_offset);
+            offset = max_offset;
+            v = wavefront_v(k, offset);
+            h = wavefront_h(k, offset);
+            if v <= 0 || h <= 0 {
+                break;
+            }
+        }
+        // Traceback operation
+        let bt_type = piggyback_get_type(max_all);
+        (score, matrix) = match bt_type {
+            BT_M => (mismatch, ComponentType::M),
+            BT_I1_OPEN | BT_D1_OPEN => (gap_open1, ComponentType::M),
+            BT_I2_OPEN | BT_D2_OPEN => (gap_open2, ComponentType::M),
+            BT_I1_EXT => (gap_extend1, ComponentType::I1),
+            BT_I2_EXT => (gap_extend2, ComponentType::I2),
+            BT_D1_EXT => (gap_extend1, ComponentType::D1),
+            BT_D2_EXT => (gap_extend2, ComponentType::D2),
+            _ => panic!("Invalid backtrace type: {bt_type}"),
+        };
+        match bt_type {
+            BT_M => {
+                push(cigar, b'X');
+                offset -= 1;
+            }
+            BT_I1_OPEN | BT_I1_EXT | BT_I2_OPEN | BT_I2_EXT => {
+                push(cigar, b'I');
+                k -= 1;
+                offset -= 1;
+            }
+            _ => {
+                push(cigar, b'D');
+                k += 1;
+            }
+        }
         v = wavefront_v(k, offset);
         h = wavefront_h(k, offset);
     }
 
-    // Account for beginning matches (only when beginning in M)
-    if component_begin == ComponentType::M && v > 0 && h > 0 {
-        let num_matches = v.min(h);
-        write_matches(cigar, num_matches);
-        v -= num_matches;
-        h -= num_matches;
-    }
-
-    // Account for beginning insertions/deletions (always emit remaining I/D)
-    while v > 0 {
-        cigar.operations[cigar.begin_offset] = b'D';
-        cigar.begin_offset -= 1;
-        v -= 1;
-    }
-    while h > 0 {
-        cigar.operations[cigar.begin_offset] = b'I';
-        cigar.begin_offset -= 1;
-        h -= 1;
+    // Account for last operations (only when the trace ends in M)
+    if matrix == ComponentType::M {
+        if v > 0 && h > 0 {
+            let num_matches = v.min(h);
+            write_matches(cigar, num_matches);
+            v -= num_matches;
+            h -= num_matches;
+        }
+        for _ in 0..v {
+            push(cigar, b'D');
+        }
+        for _ in 0..h {
+            push(cigar, b'I');
+        }
+    } else {
+        // C aborts here ("I?/D?-Beginning backtrace error").
+        debug_assert!(
+            v == 0 && h == 0 && (score == 0 || penalties.match_ != 0),
+            "I?/D?-beginning backtrace error (v={v}, h={h}, score={score})"
+        );
     }
 
     // Adjust to point to first valid operation
