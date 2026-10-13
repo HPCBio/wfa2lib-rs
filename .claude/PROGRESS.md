@@ -31,11 +31,11 @@ sync" below.
 |---|---|
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
 | Stock `wfa.utest.sh` | 57/60 identical; 3 are BiWFA CIGAR tie-breaks with match < 0 (HPCBio/wfa2lib-rs#7) |
-| banded-static (affine, affine2p, linear) | Byte-identical to C `16969b5b` in high / med / score-only modes, including unreachable pairs |
+| banded-static (affine, affine2p, linear) | Byte-identical to C 3282f83 (with smarco/WFA2-lib#125's band clamp) in high / med / score-only modes, including unreachable pairs |
 | banded-static (edit, indel) | Rust stops as unreachable; C never terminates (C bug, HPCBio/wfa2lib-rs#24) |
-| banded-adaptive | Differs: Rust applies the static clamp every N steps instead of C's re-centred band (HPCBio/wfa2lib-rs#6) |
+| banded-adaptive | C's re-centred band ported (HPCBio/wfa2lib-rs#6): 34/36 matrix cells byte-identical to C 3282f83; the other 2 are `med` (C piggyback, HPCBio/wfa2lib-rs#8) |
 | xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 3282f83 in high and score-only modes (450/576 matrix cells; the other 126 are `med`, where C uses its piggyback backtrace, HPCBio/wfa2lib-rs#8 / HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#21, HPCBio/wfa2lib-rs#23 |
-| BiWFA + any heuristic | Heuristics ignored in BiWFA sub-aligners (HPCBio/wfa2lib-rs#6) |
+| BiWFA + any heuristic | Byte-identical to C 3282f83 (banded-static/adaptive, xdrop, zdrop, wfa-adaptive; CIGAR and score-only; HPCBio/wfa2lib-rs#6), except match < 0 CIGAR tie-breaks (HPCBio/wfa2lib-rs#7) |
 | extension; ends-free with end gaps only | Byte-identical to C (all metrics incl. match < 0, alignment and score-only) |
 | ends-free with begin gaps (P0/T0 > 0) | Byte-identical to C, match == 0 and match < 0, alignment / score-only / med (HPCBio/wfa2lib-rs#9). Note: for edit/indel this includes a C bug that can emit an invalid CIGAR (known issue HPCBio/wfa2lib-rs#18, from C `380eb31b`) |
 
@@ -43,9 +43,9 @@ sync" below.
 
 C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 
-- [ ] 6565731 / 7ea485e (smarco/WFA2-lib#125): band inherited into BiWFA sub-aligners, and
+- [x] 6565731 / 7ea485e (smarco/WFA2-lib#125): band inherited into BiWFA sub-aligners, and
   compute limits clamped to `[min_k, max_k]`. This also changes unidirectional
-  banded output (HPCBio/wfa2lib-rs#6).
+  banded output (HPCBio/wfa2lib-rs#6, `3b16283` and the BiWFA commit).
 - [x] 90582eb (smarco/WFA2-lib#126): ends-free begin seeding only for ends-free span. Implemented this way in HPCBio/wfa2lib-rs#9; the baseline's end-to-end widening was never ported
   (HPCBio/wfa2lib-rs#9).
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and

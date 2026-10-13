@@ -1,7 +1,9 @@
 //! WavefrontAligner: main state machine and public API for wavefront alignment.
 
 use crate::backtrace;
-use crate::bialign::{self, BIALIGN_FALLBACK_MIN_SCORE, BiAlignBreakpoint, ComponentType};
+use crate::bialign::{
+    self, BIALIGN_FALLBACK_MIN_SCORE, BIALIGN_RECOVERY_MIN_SCORE, BiAlignBreakpoint, ComponentType,
+};
 use crate::cigar::Cigar;
 use crate::components::WavefrontComponents;
 use crate::compute;
@@ -107,6 +109,44 @@ pub type EditAligner = WavefrontAligner<1>;
 pub type AffineAligner = WavefrontAligner<3>;
 /// Type alias for gap-affine 2-piece distance (M + I1 + D1 + I2 + D2 wavefronts).
 pub type Affine2pAligner = WavefrontAligner<5>;
+
+/// Outcome of a BiWFA breakpoint search or sub-alignment (C's `WF_STATUS_*`
+/// values inside `wavefront_bialign`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BiStatus {
+    Ok,
+    /// One direction reached the end before the wavefronts overlapped (score).
+    EndReached(i32),
+    Unreachable,
+    MaxSteps,
+    /// A base-case sub-alignment did not complete.
+    Unattainable,
+}
+
+/// The heuristic's band, for banded-static / banded-adaptive.
+fn heuristic_band(h: &HeuristicStrategy) -> Option<(i32, i32)> {
+    match *h {
+        HeuristicStrategy::BandedStatic { min_k, max_k }
+        | HeuristicStrategy::BandedAdaptive { min_k, max_k, .. } => Some((min_k, max_k)),
+        _ => None,
+    }
+}
+
+/// `h` with its band replaced by [min_k, max_k] (no-op for other heuristics).
+fn with_band(h: &HeuristicStrategy, min_k: i32, max_k: i32) -> HeuristicStrategy {
+    match *h {
+        HeuristicStrategy::BandedStatic { .. } => HeuristicStrategy::BandedStatic { min_k, max_k },
+        HeuristicStrategy::BandedAdaptive {
+            steps_between_cutoffs,
+            ..
+        } => HeuristicStrategy::BandedAdaptive {
+            min_k,
+            max_k,
+            steps_between_cutoffs,
+        },
+        ref other => other.clone(),
+    }
+}
 
 /// Initial sequence lengths the components are sized for, as C's
 /// `wavefront_aligner_new` (`PATTERN_LENGTH_INIT`/`TEXT_LENGTH_INIT`). Arrays
@@ -648,6 +688,18 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Backtrace the CIGAR from M-wavefront cell (`k`, `offset`), starting at
     /// `score` (C's `wavefront_unialign_terminate`).
     fn backtrace_from(&mut self, score: i32, k: i32, offset: WfOffset) {
+        self.backtrace_components(score, k, offset, ComponentType::M, ComponentType::M);
+    }
+
+    /// `backtrace_from` between the given begin/end components (BiWFA halves).
+    fn backtrace_components(
+        &mut self,
+        score: i32,
+        k: i32,
+        offset: WfOffset,
+        component_begin: ComponentType,
+        component_end: ComponentType,
+    ) {
         let (plen, tlen) = (self.sequences.pattern_length, self.sequences.text_length);
         match self.penalties.distance_metric {
             DistanceMetric::GapAffine => backtrace::backtrace_affine(
@@ -659,8 +711,8 @@ impl<const N: usize> WavefrontAligner<N> {
                 score,
                 k,
                 offset,
-                ComponentType::M,
-                ComponentType::M,
+                component_begin,
+                component_end,
                 &mut self.cigar,
             ),
             DistanceMetric::GapAffine2p => backtrace::backtrace_affine2p(
@@ -672,8 +724,8 @@ impl<const N: usize> WavefrontAligner<N> {
                 score,
                 k,
                 offset,
-                ComponentType::M,
-                ComponentType::M,
+                component_begin,
+                component_end,
                 &mut self.cigar,
             ),
             _ => backtrace::backtrace_linear(
@@ -1495,24 +1547,13 @@ impl<const N: usize> WavefrontAligner<N> {
         self.cigar.resize(max_ops);
         self.status = AlignStatus::Ok;
 
-        // Lazily create sub-aligners and reuse them across calls (avoids 3×N alloc/free
-        // per alignment). fwd/rev use modular storage; base uses full CIGAR storage.
-        if self.biwfa_fwd.is_none() {
-            self.biwfa_fwd = Some(Box::new(Self::new_biwfa_sub(self.penalties.clone())));
-            self.biwfa_rev = Some(Box::new(Self::new_biwfa_sub(self.penalties.clone())));
-            let mut b = WavefrontAligner::<N>::new(self.penalties.clone());
-            b.alignment_scope = AlignmentScope::ComputeAlignment;
-            self.biwfa_base = Some(Box::new(b));
-        }
-
         // Take sub-aligners out of self so we can borrow self.cigar/penalties separately.
-        let mut fwd = self.biwfa_fwd.take().unwrap();
-        let mut rev = self.biwfa_rev.take().unwrap();
-        let mut base = self.biwfa_base.take().unwrap();
+        let (mut fwd, mut rev, mut base) = self.take_biwfa_subs();
 
-        let score = Self::bialign_recursive(
+        let result = Self::bialign_recursive(
             &mut self.cigar,
             &self.penalties,
+            &self.heuristic,
             self.max_alignment_steps,
             &mut fwd,
             &mut rev,
@@ -1529,9 +1570,25 @@ impl<const N: usize> WavefrontAligner<N> {
             0,
         );
 
-        self.cigar.end_v = plen;
-        self.cigar.end_h = tlen;
-        self.status = AlignStatus::Completed;
+        // C's `wavefront_bialign` status mapping; on failure the CIGAR holds
+        // whatever was appended before it.
+        let score = match result {
+            Ok(score) => {
+                self.cigar.end_v = plen;
+                self.cigar.end_h = tlen;
+                self.status = AlignStatus::Completed;
+                score
+            }
+            Err(status) => {
+                // C reports the other failures as UNATTAINABLE.
+                self.status = if status == BiStatus::MaxSteps {
+                    AlignStatus::MaxStepsReached
+                } else {
+                    AlignStatus::EndUnreachable
+                };
+                0
+            }
+        };
 
         // Return sub-aligners to self for reuse on the next call.
         self.biwfa_fwd = Some(fwd);
@@ -1539,6 +1596,73 @@ impl<const N: usize> WavefrontAligner<N> {
         self.biwfa_base = Some(base);
 
         score
+    }
+
+    /// BiWFA score only (C's `wavefront_bialign_compute_score`): the score of
+    /// the first breakpoint, or of the end if one direction reaches it first.
+    /// Without heuristics this equals [`Self::align_end2end`]'s score; with
+    /// them, the forward and reverse searches are cut off independently. On
+    /// failure the status is `EndUnreachable` or `MaxStepsReached` and the
+    /// returned score is meaningless.
+    pub fn align_biwfa_score(&mut self, pattern: &[u8], text: &[u8]) -> i32 {
+        self.sequences.init_ascii(pattern, text, false);
+        self.cigar.clear();
+        let (mut fwd, mut rev, base) = self.take_biwfa_subs();
+
+        // Top-level band shift: the sub-problem is the whole alignment.
+        fwd.heuristic = self.heuristic.clone();
+        rev.heuristic = self.heuristic.clone();
+        if let Some((min_k, max_k)) = heuristic_band(&self.heuristic) {
+            let diag = text.len() as i32 - pattern.len() as i32;
+            rev.heuristic = with_band(&self.heuristic, diag - max_k, diag - min_k);
+        }
+
+        let mut breakpoint = BiAlignBreakpoint::new();
+        let status = Self::bialign_find_breakpoint(
+            &self.penalties,
+            self.max_alignment_steps,
+            &mut fwd,
+            &mut rev,
+            pattern,
+            text,
+            ComponentType::M,
+            ComponentType::M,
+            &mut breakpoint,
+        );
+        let score = match status {
+            BiStatus::Ok => breakpoint.score,
+            BiStatus::EndReached(score) => score,
+            _ => 0,
+        };
+        self.status = match status {
+            BiStatus::Ok | BiStatus::EndReached(_) => AlignStatus::Completed,
+            BiStatus::MaxSteps => AlignStatus::MaxStepsReached,
+            _ => AlignStatus::EndUnreachable,
+        };
+
+        self.biwfa_fwd = Some(fwd);
+        self.biwfa_rev = Some(rev);
+        self.biwfa_base = Some(base);
+        score
+    }
+
+    /// Take the BiWFA sub-aligners (forward, reverse, base) out of `self`,
+    /// creating them on first use; callers put them back. fwd/rev use modular
+    /// storage; base uses full CIGAR storage.
+    #[allow(clippy::type_complexity)]
+    fn take_biwfa_subs(&mut self) -> (Box<Self>, Box<Self>, Box<Self>) {
+        if self.biwfa_fwd.is_none() {
+            self.biwfa_fwd = Some(Box::new(Self::new_biwfa_sub(self.penalties.clone())));
+            self.biwfa_rev = Some(Box::new(Self::new_biwfa_sub(self.penalties.clone())));
+            let mut b = WavefrontAligner::<N>::new(self.penalties.clone());
+            b.alignment_scope = AlignmentScope::ComputeAlignment;
+            self.biwfa_base = Some(Box::new(b));
+        }
+        (
+            self.biwfa_fwd.take().unwrap(),
+            self.biwfa_rev.take().unwrap(),
+            self.biwfa_base.take().unwrap(),
+        )
     }
 
     /// End-to-end alignment using a custom match function (Lambda mode).
@@ -1594,11 +1718,16 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
-    /// Recursive BiWFA divide-and-conquer alignment.
+    /// Recursive BiWFA divide-and-conquer alignment (C's
+    /// `wavefront_bialign_alignment`). `heuristic` is the top-level aligner's;
+    /// sub-aligners inherit it with the band shifted to each sub-problem
+    /// (smarco/WFA2-lib#125). Returns the alignment score, or the status that
+    /// stopped it.
     #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
     fn bialign_recursive(
         cigar: &mut Cigar,
         penalties: &WavefrontPenalties,
+        heuristic: &HeuristicStrategy,
         max_steps: i32,
         fwd: &mut WavefrontAligner<N>,
         rev: &mut WavefrontAligner<N>,
@@ -1613,7 +1742,7 @@ impl<const N: usize> WavefrontAligner<N> {
         component_end: ComponentType,
         score_remaining: i32,
         level: i32,
-    ) -> i32 {
+    ) -> Result<i32, BiStatus> {
         let plen = pe - pb;
         let tlen = te - tb;
 
@@ -1622,21 +1751,21 @@ impl<const N: usize> WavefrontAligner<N> {
             if plen > 0 {
                 cigar.append_deletion(plen as usize);
             }
-            return 0;
+            return Ok(0);
         }
         if plen == 0 {
             if tlen > 0 {
                 cigar.append_insertion(tlen as usize);
             }
-            return 0;
+            return Ok(0);
         }
 
         // Fallback to standard WFA for small subproblems
         const MIN_LENGTH: i32 = 100;
-        if score_remaining <= BIALIGN_FALLBACK_MIN_SCORE || plen.max(tlen) <= MIN_LENGTH {
-            return Self::bialign_base(
+        let fallback = |cigar: &mut Cigar, base: &mut WavefrontAligner<N>| {
+            Self::bialign_base(
                 cigar,
-                penalties,
+                heuristic,
                 base,
                 pattern,
                 text,
@@ -1646,7 +1775,22 @@ impl<const N: usize> WavefrontAligner<N> {
                 te,
                 component_begin,
                 component_end,
-            );
+            )
+        };
+        if score_remaining <= BIALIGN_FALLBACK_MIN_SCORE || plen.max(tlen) <= MIN_LENGTH {
+            return fallback(cigar, base);
+        }
+
+        // Sub-aligners inherit the heuristic, with the band shifted to this
+        // sub-problem (C's `wavefront_bialign_set_subsidiary_band`).
+        fwd.heuristic = heuristic.clone();
+        rev.heuristic = heuristic.clone();
+        if let Some((min_k, max_k)) = heuristic_band(heuristic) {
+            let shift = tb - pb;
+            let (fmin, fmax) = (min_k - shift, max_k - shift);
+            let diag = tlen - plen;
+            fwd.heuristic = with_band(heuristic, fmin, fmax);
+            rev.heuristic = with_band(heuristic, diag - fmax, diag - fmin);
         }
 
         // Find breakpoint via bidirectional expansion
@@ -1654,7 +1798,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let t_sub = &text[tb as usize..te as usize];
         let mut breakpoint = BiAlignBreakpoint::new();
 
-        let found = Self::bialign_find_breakpoint(
+        match Self::bialign_find_breakpoint(
             penalties,
             max_steps,
             fwd,
@@ -1664,22 +1808,15 @@ impl<const N: usize> WavefrontAligner<N> {
             component_begin,
             component_end,
             &mut breakpoint,
-        );
-
-        if !found {
-            return Self::bialign_base(
-                cigar,
-                penalties,
-                base,
-                pattern,
-                text,
-                pb,
-                pe,
-                tb,
-                te,
-                component_begin,
-                component_end,
-            );
+        ) {
+            BiStatus::Ok => {}
+            // One direction reached the end first: fall back if cheap enough
+            // (C's `wavefront_bialign_find_breakpoint_exception`).
+            BiStatus::EndReached(score) if score <= BIALIGN_RECOVERY_MIN_SCORE => {
+                return fallback(cigar, base);
+            }
+            BiStatus::EndReached(_) => return Err(BiStatus::Unreachable),
+            status => return Err(status),
         }
 
         // Split at breakpoint (forward h,v coordinates)
@@ -1690,6 +1827,7 @@ impl<const N: usize> WavefrontAligner<N> {
         Self::bialign_recursive(
             cigar,
             penalties,
+            heuristic,
             max_steps,
             fwd,
             rev,
@@ -1704,12 +1842,13 @@ impl<const N: usize> WavefrontAligner<N> {
             breakpoint.component,
             breakpoint.score_forward,
             level + 1,
-        );
+        )?;
 
         // Recurse on second half [pb+bp_v..pe, tb+bp_h..te]
         Self::bialign_recursive(
             cigar,
             penalties,
+            heuristic,
             max_steps,
             fwd,
             rev,
@@ -1724,12 +1863,16 @@ impl<const N: usize> WavefrontAligner<N> {
             component_end,
             breakpoint.score_reverse,
             level + 1,
-        );
+        )?;
 
-        breakpoint.score
+        Ok(breakpoint.score)
     }
 
-    /// Two-phase breakpoint detection for BiWFA.
+    /// Two-phase breakpoint detection for BiWFA (C's
+    /// `wavefront_bialign_find_breakpoint`). The forward aligner ends in
+    /// `component_end` and the reverse one in `component_begin`; either may
+    /// finish first (end reached, or unreachable under a heuristic), which is
+    /// reported instead of a breakpoint.
     #[allow(clippy::too_many_arguments)]
     fn bialign_find_breakpoint(
         penalties: &WavefrontPenalties,
@@ -1741,7 +1884,7 @@ impl<const N: usize> WavefrontAligner<N> {
         component_begin: ComponentType,
         component_end: ComponentType,
         breakpoint: &mut BiAlignBreakpoint,
-    ) -> bool {
+    ) -> BiStatus {
         let plen = pattern.len() as i32;
         let tlen = text.len() as i32;
 
@@ -1751,6 +1894,15 @@ impl<const N: usize> WavefrontAligner<N> {
         fwd.init_alignment_component(component_begin);
         rev.sequences.init_ascii(pattern, text, true);
         rev.init_alignment_component(component_end);
+        // Each direction terminates at the other end's component.
+        let (fwd_end, rev_end) = (component_end, component_begin);
+        let quit = |a: &WavefrontAligner<N>| {
+            if a.status == AlignStatus::EndReached {
+                BiStatus::EndReached(a.alignment_end_pos.score)
+            } else {
+                BiStatus::Unreachable
+            }
+        };
 
         let has_affine = matches!(
             penalties.distance_metric,
@@ -1766,44 +1918,49 @@ impl<const N: usize> WavefrontAligner<N> {
         let max_antidiag = plen + tlen - 1;
         let mut score_fwd = 0i32;
         let mut score_rev = 0i32;
-        let mut last_was_forward = true;
+        let mut last_was_forward = false;
 
         // Extend at score 0
-        let mut fwd_max_ak = fwd.extend_biwfa_max(0);
-        let mut rev_max_ak = rev.extend_biwfa_max(0);
+        let (done, mut fwd_max_ak) = fwd.extend_biwfa_step(0, fwd_end, true);
+        if done {
+            return quit(fwd);
+        }
+        let (done, mut rev_max_ak) = rev.extend_biwfa_step(0, rev_end, true);
+        if done {
+            return quit(rev);
+        }
 
         // Phase 1: Alternate compute+extend until antidiagonals meet
         while fwd_max_ak + rev_max_ak < max_antidiag {
             // Forward
             score_fwd += 1;
             fwd.compute_step(score_fwd);
-            let ak = fwd.extend_biwfa_max(score_fwd);
-            if ak > fwd_max_ak {
-                fwd_max_ak = ak;
-            }
+            let (done, ak) = fwd.extend_biwfa_step(score_fwd, fwd_end, true);
+            fwd_max_ak = fwd_max_ak.max(ak);
             last_was_forward = true;
+            if done {
+                return quit(fwd);
+            }
             if fwd_max_ak + rev_max_ak >= max_antidiag {
                 break;
             }
-
             // Reverse
             score_rev += 1;
             rev.compute_step(score_rev);
-            let ak = rev.extend_biwfa_max(score_rev);
-            if ak > rev_max_ak {
-                rev_max_ak = ak;
-            }
+            let (done, ak) = rev.extend_biwfa_step(score_rev, rev_end, true);
+            rev_max_ak = rev_max_ak.max(ak);
             last_was_forward = false;
-
+            if done {
+                return quit(rev);
+            }
             if score_fwd + score_rev >= max_steps {
-                return false;
+                return BiStatus::MaxSteps;
             }
         }
 
         // Phase 2: Alternate compute+extend with overlap checks
         // Match C reference: overlap check first, then compute opposite direction
         let max_score_scope = fwd.wf_components.max_score_scope as i32;
-
         loop {
             if last_was_forward {
                 // Check forward overlap
@@ -1831,11 +1988,12 @@ impl<const N: usize> WavefrontAligner<N> {
                     true,
                     breakpoint,
                 );
-
                 // Compute+extend reverse
                 score_rev += 1;
                 rev.compute_step(score_rev);
-                rev.extend_biwfa(score_rev);
+                if rev.extend_biwfa_step(score_rev, rev_end, false).0 {
+                    return quit(rev);
+                }
             }
 
             // Check reverse overlap
@@ -1867,23 +2025,27 @@ impl<const N: usize> WavefrontAligner<N> {
             // Compute+extend forward
             score_fwd += 1;
             fwd.compute_step(score_fwd);
-            fwd.extend_biwfa(score_fwd);
-
+            if fwd.extend_biwfa_step(score_fwd, fwd_end, false).0 {
+                return quit(fwd);
+            }
             if score_fwd + score_rev >= max_steps {
-                return false;
+                return BiStatus::MaxSteps;
             }
 
             last_was_forward = true;
         }
 
-        breakpoint.found()
+        BiStatus::Ok
     }
 
-    /// Base case: run standard WFA with component-aware backtrace.
+    /// Base case: unidirectional WFA between the given components (C's
+    /// `wavefront_bialign_base`). The base aligner takes the top-level
+    /// heuristic, band shifted to the sub-problem. Its CIGAR is appended
+    /// whether or not it completed (empty, or max-trimmed after a Z-drop).
     #[allow(clippy::too_many_arguments)]
     fn bialign_base(
         cigar: &mut Cigar,
-        penalties: &WavefrontPenalties,
+        heuristic: &HeuristicStrategy,
         base: &mut WavefrontAligner<N>,
         pattern: &[u8],
         text: &[u8],
@@ -1893,49 +2055,31 @@ impl<const N: usize> WavefrontAligner<N> {
         te: i32,
         component_begin: ComponentType,
         component_end: ComponentType,
-    ) -> i32 {
+    ) -> Result<i32, BiStatus> {
         let p_sub = &pattern[pb as usize..pe as usize];
         let t_sub = &text[tb as usize..te as usize];
+
+        base.heuristic = match heuristic_band(heuristic) {
+            Some((min_k, max_k)) => with_band(heuristic, min_k - (tb - pb), max_k - (tb - pb)),
+            None => heuristic.clone(),
+        };
 
         // Init sequences and alignment with the specified starting component
         base.sequences.init_ascii(p_sub, t_sub, false);
         base.init_alignment_component(component_begin);
 
-        // Alignment loop: extend M for match propagation, but check
-        // the component_end wavefront for termination.
+        // C's `wavefront_unialign`, terminating on `component_end`.
         let mut score = 0;
         loop {
-            // Always extend M wavefront (needed for correct propagation)
-            let m_ptr = base.wf_components.get_m_ptr(score as usize);
-            if !m_ptr.is_null() {
-                let wf = unsafe { &mut *m_ptr };
-                if base.sequences.mode == SequenceMode::Lambda {
-                    extend::extend_matches_custom_end2end(&base.sequences, wf);
-                } else {
-                    extend::extend_matches_packed_end2end(&base.sequences, wf);
-                }
-            }
-
-            // Check termination on the component_end wavefront
-            if Self::check_component_termination(base, score, component_end) {
+            if base.extend_biwfa_step(score, component_end, false).0 {
                 break;
             }
-
             score += 1;
             if !base.wf_components.has_slot(score as usize) {
                 base.status = AlignStatus::MaxStepsReached;
                 break;
             }
             base.compute_step(score);
-
-            // For non-M components, also check right after compute
-            // (since I/D wavefronts are finalized by compute, not extend)
-            if component_end != ComponentType::M
-                && Self::check_component_termination(base, score, component_end)
-            {
-                break;
-            }
-
             if score >= base.max_alignment_steps {
                 base.status = AlignStatus::MaxStepsReached;
                 break;
@@ -1945,58 +2089,26 @@ impl<const N: usize> WavefrontAligner<N> {
         // Record how many flat slots were used (for efficient clear on next call).
         base.wf_components.prev_score_count = (score + 1) as usize;
 
-        // Backtrace with component-aware start/end
-        if base.status == AlignStatus::EndReached {
-            let pos = base.alignment_end_pos;
-            match penalties.distance_metric {
-                DistanceMetric::GapAffine => {
-                    backtrace::backtrace_affine(
-                        &base.wf_components,
-                        &base.wavefront_slab,
-                        penalties,
-                        base.sequences.pattern_length,
-                        base.sequences.text_length,
-                        pos.score,
-                        pos.k,
-                        pos.offset,
-                        component_begin,
-                        component_end,
-                        &mut base.cigar,
-                    );
-                }
-                DistanceMetric::GapAffine2p => {
-                    backtrace::backtrace_affine2p(
-                        &base.wf_components,
-                        &base.wavefront_slab,
-                        penalties,
-                        base.sequences.pattern_length,
-                        base.sequences.text_length,
-                        pos.score,
-                        pos.k,
-                        pos.offset,
-                        component_begin,
-                        component_end,
-                        &mut base.cigar,
-                    );
-                }
-                _ => {
-                    backtrace::backtrace_linear(
-                        &base.wf_components,
-                        &base.wavefront_slab,
-                        penalties,
-                        base.sequences.pattern_length,
-                        base.sequences.text_length,
-                        pos.score,
-                        pos.k,
-                        pos.offset,
-                        &mut base.cigar,
-                    );
-                }
+        // C's `wavefront_unialign_terminate`: backtrace when the end was
+        // reached, or from the best cell after a Z-drop (then max-trimmed).
+        let pos = base.alignment_end_pos;
+        let result = match base.status {
+            AlignStatus::EndReached => {
+                base.backtrace_components(score, pos.k, pos.offset, component_begin, component_end);
+                Ok(score)
             }
-            cigar.append_forward(&base.cigar);
-        }
-
-        score
+            AlignStatus::EndUnreachable if pos.offset != OFFSET_NULL => {
+                base.backtrace_components(score, pos.k, pos.offset, component_begin, component_end);
+                base.maxtrim_cigar();
+                Err(BiStatus::Unattainable)
+            }
+            _ => {
+                base.cigar.clear();
+                Err(BiStatus::Unattainable)
+            }
+        };
+        cigar.append_forward(&base.cigar);
+        result
     }
 
     /// Initialize alignment with a specific starting component (for BiWFA base case).
@@ -2240,32 +2352,49 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
-    /// Extend wavefront for BiWFA, returning max antidiagonal.
-    fn extend_biwfa_max(&mut self, score: i32) -> i32 {
+    /// One BiWFA extend step (C's `wavefront_extend_end2end_max`, or
+    /// `wavefront_extend_end2end` when `max` is false): extend M, then report
+    /// done if the alignment is unreachable (null steps), `component_end` is
+    /// reached, or the heuristic drops it. Returns `(done, max_antidiagonal)`;
+    /// the antidiagonal is 0 unless `max` and not done.
+    fn extend_biwfa_step(
+        &mut self,
+        score: i32,
+        component_end: ComponentType,
+        max: bool,
+    ) -> (bool, i32) {
         let m_ptr = self.wf_components.get_m_ptr(score as usize);
         if m_ptr.is_null() {
-            return 0;
+            if self.num_null_steps > self.wf_components.max_score_scope as i32 {
+                self.status = AlignStatus::EndUnreachable;
+                return (true, 0);
+            }
+            return (false, 0);
         }
         let wf = unsafe { &mut *m_ptr };
-        if self.sequences.mode == SequenceMode::Lambda {
-            extend::extend_matches_custom_end2end_max(&self.sequences, wf)
-        } else {
-            extend::extend_matches_packed_end2end_max(&self.sequences, wf)
+        let lambda = self.sequences.mode == SequenceMode::Lambda;
+        let max_ak = match (max, lambda) {
+            (true, true) => extend::extend_matches_custom_end2end_max(&self.sequences, wf),
+            (true, false) => extend::extend_matches_packed_end2end_max(&self.sequences, wf),
+            (false, true) => {
+                extend::extend_matches_custom_end2end(&self.sequences, wf);
+                0
+            }
+            (false, false) => {
+                extend::extend_matches_packed_end2end(&self.sequences, wf);
+                0
+            }
+        };
+        if Self::check_component_termination(self, score, component_end) {
+            return (true, 0);
         }
-    }
-
-    /// Extend wavefront for BiWFA (no max tracking).
-    fn extend_biwfa(&mut self, score: i32) {
-        let m_ptr = self.wf_components.get_m_ptr(score as usize);
-        if m_ptr.is_null() {
-            return;
+        if !matches!(self.heuristic, HeuristicStrategy::None)
+            && self.apply_heuristic_cutoff(score, m_ptr)
+        {
+            self.status = AlignStatus::EndUnreachable;
+            return (true, 0);
         }
-        let wf = unsafe { &mut *m_ptr };
-        if self.sequences.mode == SequenceMode::Lambda {
-            extend::extend_matches_custom_end2end(&self.sequences, wf);
-        } else {
-            extend::extend_matches_packed_end2end(&self.sequences, wf);
-        }
+        (false, max_ak)
     }
 }
 
@@ -3039,5 +3168,72 @@ mod tests {
         std_aligner.alignment_scope = AlignmentScope::ComputeAlignment;
         let std_score = std_aligner.align_end2end(pattern, text);
         assert_eq!(biwfa_score, std_score);
+    }
+
+    /// Deterministic 300 bp pair with a few edits (long enough for BiWFA to
+    /// search for a breakpoint rather than fall back to unidirectional WFA).
+    fn biwfa_test_pair() -> (Vec<u8>, Vec<u8>) {
+        let mut x = 12345u32;
+        let pattern: Vec<u8> = (0..300)
+            .map(|_| {
+                x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                b"ACGT"[(x >> 16) as usize % 4]
+            })
+            .collect();
+        let mut text = pattern.clone();
+        text[50] = if text[50] == b'A' { b'C' } else { b'A' };
+        text.remove(120);
+        text.insert(200, b'G');
+        (pattern, text)
+    }
+
+    #[test]
+    fn test_biwfa_score_matches_end2end() {
+        let (pattern, text) = biwfa_test_pair();
+        let penalties = WavefrontPenalties::new_affine(crate::penalties::AffinePenalties {
+            match_: 0,
+            mismatch: 4,
+            gap_opening: 6,
+            gap_extension: 2,
+        });
+        let mut aligner = AffineAligner::new(penalties.clone());
+        let score = aligner.align_biwfa_score(&pattern, &text);
+        assert_eq!(aligner.status(), AlignStatus::Completed);
+        let mut std_aligner = AffineAligner::new(penalties);
+        assert_eq!(score, std_aligner.align_end2end(&pattern, &text));
+    }
+
+    #[test]
+    fn test_biwfa_band_excluding_end_is_unreachable() {
+        // End diagonal k = -30 is outside the [-5, 5] band, which the
+        // sub-aligners now inherit (as C's smarco/WFA2-lib#125); previously
+        // BiWFA ignored the heuristic and completed.
+        let (pattern, _) = biwfa_test_pair();
+        let text = &pattern[..270];
+        let mut aligner = AffineAligner::new(WavefrontPenalties::new_affine(
+            crate::penalties::AffinePenalties {
+                match_: 0,
+                mismatch: 4,
+                gap_opening: 6,
+                gap_extension: 2,
+            },
+        ));
+        aligner.set_heuristic(HeuristicStrategy::BandedStatic {
+            min_k: -5,
+            max_k: 5,
+        });
+        aligner.align_biwfa(&pattern, text);
+        assert_eq!(aligner.status(), AlignStatus::EndUnreachable);
+        assert!(aligner.cigar().operations_slice().is_empty());
+        aligner.align_biwfa_score(&pattern, text);
+        assert_eq!(aligner.status(), AlignStatus::EndUnreachable);
+        // A band containing the end diagonal still aligns.
+        aligner.set_heuristic(HeuristicStrategy::BandedStatic {
+            min_k: -40,
+            max_k: 5,
+        });
+        aligner.align_biwfa(&pattern, text);
+        assert_eq!(aligner.status(), AlignStatus::Completed);
+        aligner.cigar().check_alignment(&pattern, text).unwrap();
     }
 }
