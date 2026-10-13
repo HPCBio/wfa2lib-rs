@@ -31,8 +31,8 @@ git -C "$DEST" checkout --quiet "$COMMIT"
 
 # Drop -march=native so C uses its scalar kernels on every machine. With
 # AVX2, C's ends-free extend checks termination in a different diagonal
-# order and can end on a different diagonal (other CIGAR and score); the
-# Rust port follows the scalar order. See HPCBio/wfa2lib-rs#34.
+# order and can return a different, equally optimal alignment; the Rust
+# port follows the scalar order. See HPCBio/wfa2lib-rs#34.
 # Apple clang has no OpenMP: also drop -fopenmp (unused here).
 drop_flag() { # pattern
   grep -rl --include=Makefile -e "$1" "$DEST" | while read -r mk; do

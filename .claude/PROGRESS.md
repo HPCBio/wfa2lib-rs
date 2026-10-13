@@ -74,9 +74,11 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 - HPCBio/wfa2lib-rs#34: C's ends-free/extension results depend on the CPU.
   Built with `-march=native` on AVX2/AVX-512, C's ends-free extend checks
   termination in a different diagonal order from its scalar kernel, so it
-  can end on a different diagonal (other score and CIGAR). Rust follows
-  the scalar order on every CPU; the harness builds C without
-  `-march=native`.
+  can pick a different one of several equally optimal alignments. The
+  ends-free score is the same and optimal (checked against an exact DP);
+  `align_benchmark`'s printed score differs only because it rescores the
+  CIGAR globally, charging free end gaps. Rust follows the scalar order on
+  every CPU; the harness builds C without `-march=native`.
 - smarco/WFA2-lib#102: ends-free with match < 0 can be suboptimal, depending on argument
   order. This showed up in HPCBio/dada2-rs#51. Note that dada2-rs's
   "free leading end-gap not credited" failure mode was the Rust HPCBio/wfa2lib-rs#9 bug,
