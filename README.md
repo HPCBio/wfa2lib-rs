@@ -59,9 +59,23 @@ cargo build
 # Optimized release build (recommended)
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 
-# Run tests (228 tests: 210 unit + 18 integration)
+# Run tests (unit, integration, and CLI tests)
 cargo test
 ```
+
+The integration tests (`tests/test_vs_reference.rs`) and the C-parity script
+(`tests/wfa_utest.sh`) compare against the reference outputs shipped with the
+C library, so they expect a [WFA2-lib](https://github.com/smarco/WFA2-lib)
+checkout at `./WFA2-lib` (a symlink works; the path is gitignored):
+
+```bash
+git clone https://github.com/smarco/WFA2-lib   # or: ln -s /path/to/WFA2-lib WFA2-lib
+cargo test
+bash tests/wfa_utest.sh   # Rust align_benchmark vs WFA2-lib/tests/wfa.utest.check
+```
+
+Without it, `tests/test_vs_reference.rs` fails with "failed to read sequence
+file". The CLI tests (`tests/cli_output.rs`, `cli` feature) need no checkout.
 
 ## Usage
 
@@ -116,7 +130,12 @@ cargo run --release --bin align_benchmark -- \
     -i sequences.seq
 ```
 
-Input files use the WFA2-lib format: one alignment pair per line, with pattern and text separated by a `>` character.
+Input files use the WFA2-lib format: each pair is two lines, `>pattern` then
+`<text`. Output is one `score<TAB>CIGAR` line per pair (`-` for no CIGAR), written
+as each pair is aligned. Like the C tool, it also supports `--wfa-span`
+(`global`, `extension`, `ends-free,P0,Pf,T0,Tf`) and `--wfa-heuristic` with
+`--wfa-heuristic-parameters` (`banded-static`, `banded-adaptive`,
+`wfa-adaptive`, `xdrop`, `zdrop`).
 
 ## Project structure
 

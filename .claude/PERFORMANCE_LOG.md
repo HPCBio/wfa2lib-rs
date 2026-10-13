@@ -101,7 +101,7 @@ and output-identical comes first in the project goals, so the trimming stays.
 **Optimization target:** make I/D trimming cheaper without changing which
 diagonals survive.
 
-**Memory:** Rust max RSS is about 200 MB in every mode, at all three commits,
+**Memory** (since fixed by streaming CLI I/O, `0f1eed5`; see below): Rust max RSS is about 200 MB in every mode, at all three commits,
 vs 1.6–9.5 MB for C. That points to the `align_benchmark` CLI rather than the
 library: it reads the whole input file (about 100 MB here) into memory and
 buffers all output lines, while C streams. It fails PLAN's "memory within 1.5x"
@@ -142,4 +142,25 @@ ported affine backtrace, null-step counting in compute, and the
 
 No measurable regression (within ~2%). The largest change, affine2p CIGAR,
 is consistent with the ported backtrace doing all of C's source lookups.
+
+### 2026-10-13 — `0f1eed5` streaming CLI I/O: memory
+
+Max RSS (`/usr/bin/time -l`), 50,000 × 1 kb, same machine. "main" is
+`55231da`.
+
+| Mode | C | main | `0f1eed5` | `0f1eed5`, system allocator |
+|---|---|---|---|---|
+| Edit score | 1.6 MB | 199.2 MB | 2.5 MB | 2.0 MB |
+| Affine score | 1.7 MB | 199.2 MB | 2.6 MB | 2.1 MB |
+| Affine CIGAR | 4.3 MB | 199.2 MB | 10.7 MB | 10.0 MB |
+| BiWFA (ultralow) | 3.2 MB | 199.2 MB | 6.2 MB | 5.7 MB |
+
+- The ~200 MB was the CLI buffering the whole input and all output. Streaming
+  removes it; runtime is unchanged (affine score 1944 → 1932 ms).
+- The library's own memory is now visible: about 1.2–2.5× C. mimalloc accounts
+  for only ~0.5 MB.
+- **Next memory target:** in CIGAR (non-modular) mode every wavefront is
+  allocated over the full historic diagonal range, whereas C allocates each at
+  its `lo..hi` (plus margins). That likely explains most of the affine CIGAR
+  gap (10.7 vs 4.3 MB) against PLAN's "memory within 1.5x" target.
 
