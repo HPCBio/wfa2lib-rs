@@ -8,7 +8,7 @@ use clap::Parser;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use wfa2lib_rs::aligner::{
-    Affine2pAligner, AffineAligner, AlignStatus, AlignmentScope, EditAligner,
+    Affine2pAligner, AffineAligner, AlignStatus, AlignmentScope, EditAligner, MemoryMode,
 };
 use wfa2lib_rs::cigar::Cigar;
 use wfa2lib_rs::heuristic::HeuristicStrategy;
@@ -398,6 +398,14 @@ impl AnyAligner {
         }
     }
 
+    fn set_memory_mode(&mut self, mode: MemoryMode) {
+        match self {
+            AnyAligner::N1(a) => a.set_memory_mode(mode),
+            AnyAligner::N3(a) => a.set_memory_mode(mode),
+            AnyAligner::N5(a) => a.set_memory_mode(mode),
+        }
+    }
+
     fn set_max_alignment_steps(&mut self, max_steps: i32) {
         match self {
             AnyAligner::N1(a) => a.set_max_alignment_steps(max_steps),
@@ -471,6 +479,15 @@ fn main() {
     let penalties = build_penalties(&cli);
     let score_only = cli.wfa_score_only;
     let use_biwfa = cli.wfa_memory.as_deref() == Some("ultralow");
+    let memory_mode = match cli.wfa_memory.as_deref() {
+        None | Some("high") | Some("ultralow") => MemoryMode::High,
+        Some("med") => MemoryMode::Med,
+        Some("low") => MemoryMode::Low,
+        Some(_) => {
+            eprintln!("Option '--wfa-memory' must be in {{'high','med','low','ultralow'}}");
+            std::process::exit(1);
+        }
+    };
     let do_check = cli.check.is_some() && !score_only;
 
     let mut aligner = build_aligner(penalties.clone());
@@ -496,6 +513,8 @@ fn main() {
         }
         aligner.set_heuristic(strategy);
     }
+
+    aligner.set_memory_mode(memory_mode);
 
     if let Some(max_steps) = cli.wfa_max_steps {
         aligner.set_max_alignment_steps(max_steps);

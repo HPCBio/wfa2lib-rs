@@ -5,13 +5,15 @@ use crate::bialign::{
     self, BIALIGN_FALLBACK_MIN_LENGTH, BIALIGN_FALLBACK_MIN_SCORE, BIALIGN_RECOVERY_MIN_SCORE,
     BiAlignBreakpoint, ComponentType,
 };
+use crate::bt_buffer::BacktraceBuffer;
 use crate::cigar::Cigar;
 use crate::components::WavefrontComponents;
 use crate::compute;
-use crate::compute::{affine, affine2p, edit, linear};
+use crate::compute::{affine, affine2p, edit, linear, piggyback};
 use crate::extend;
 use crate::heuristic::{self, HeuristicState, HeuristicStrategy};
 use crate::offset::{DPMATRIX_DIAGONAL_NULL, OFFSET_NULL, WfOffset, wavefront_h, wavefront_v};
+use crate::pcigar::PCIGAR_MAX_LENGTH;
 use crate::penalties::{DistanceMetric, WavefrontPenalties};
 use crate::sequences::{SequenceMode, WavefrontSequences};
 use crate::components::WF_PTR_NONE;
@@ -26,6 +28,26 @@ pub enum AlignmentScope {
     ComputeScore,
     /// Compute score and full alignment (CIGAR).
     ComputeAlignment,
+}
+
+/// Wavefront memory mode (C's `wavefront_memory_t`, without `ultralow`,
+/// which is BiWFA: [`WavefrontAligner::align_biwfa`]).
+///
+/// Only affects alignments (CIGAR); score-only always keeps just the
+/// wavefronts it still needs. `Med` and `Low` keep only those too, and record
+/// the alignment as packed CIGARs alongside the wavefronts ("piggyback"
+/// backtrace), stored in a backtrace buffer; they differ in how full a packed
+/// CIGAR gets before it is offloaded. Between co-optimal alignments they may
+/// choose differently from `High`, exactly as C does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryMode {
+    /// Keep every wavefront and backtrace through them (the default).
+    #[default]
+    High,
+    /// Piggyback backtrace, offloading packed CIGARs at half occupancy.
+    Med,
+    /// Piggyback backtrace, offloading packed CIGARs only when (nearly) full.
+    Low,
 }
 
 /// Alignment span mode.
@@ -95,6 +117,11 @@ pub struct WavefrontAligner<const N: usize> {
     pub heuristic: HeuristicStrategy,
     pub heuristic_state: HeuristicState,
 
+    /// Memory mode for alignments (see [`MemoryMode`]).
+    pub memory_mode: MemoryMode,
+    /// Backtrace-buffer size (bytes) above which med/low compact it.
+    pub max_memory_compact: u64,
+
     // System limits
     pub max_alignment_steps: i32,
 
@@ -110,6 +137,106 @@ pub type EditAligner = WavefrontAligner<1>;
 pub type AffineAligner = WavefrontAligner<3>;
 /// Type alias for gap-affine 2-piece distance (M + I1 + D1 + I2 + D2 wavefronts).
 pub type Affine2pAligner = WavefrontAligner<5>;
+
+/// Start a backtrace chain at cell `k` of `wf`, which is (v, h): an empty
+/// pcigar pointing to a new initial block (C's
+/// `wf_backtrace_buffer_init_block`).
+fn set_bt_init(
+    wf: &mut crate::wavefront::Wavefront,
+    buf: &mut BacktraceBuffer,
+    k: i32,
+    v: i32,
+    h: i32,
+) {
+    wf.set_bt_pcigar(k, 0);
+    wf.set_bt_prev(k, buf.init_block(v, h));
+}
+
+/// C's `wf_backtrace_buffer_unpack_cigar_{linear,affine}`: build the CIGAR
+/// from packed blocks (`packed` is end-first), starting at `begin` (preceded
+/// by its begin-free I/D) and ending at `end`, then padded with matches and
+/// end I/D to the full sequences. With `affine`, matches are only
+/// re-extended in M, and an X after I/D (gap close) is dropped.
+fn unpack_piggyback(
+    packed: &[crate::pcigar::Pcigar],
+    sequences: &WavefrontSequences,
+    begin: (i32, i32),
+    end: (i32, i32),
+    affine: bool,
+    cigar: &mut Cigar,
+) {
+    use crate::pcigar::{PCIGAR_FULL_MASK, pcigar_extract, pcigar_free_slots};
+    let (plen, tlen) = (sequences.pattern_length, sequences.text_length);
+    let lambda = sequences.mode == SequenceMode::Lambda;
+    let matches = |v: i32, h: i32| -> bool {
+        if lambda {
+            sequences.cmp_lambda(v, h)
+        } else {
+            v < plen && h < tlen && sequences.cmp(v, h)
+        }
+    };
+    let ops = &mut cigar.operations;
+    let mut n = 0usize;
+    let mut put = |op: u8| {
+        ops[n] = op;
+        n += 1;
+    };
+    let (mut v, mut h) = begin;
+    (0..h).for_each(|_| put(b'I'));
+    (0..v).for_each(|_| put(b'D'));
+    let mut in_m = true;
+    for &block in packed.iter().rev() {
+        let mut pcigar = block;
+        let mut length = PCIGAR_MAX_LENGTH;
+        if pcigar < PCIGAR_FULL_MASK {
+            let free = pcigar_free_slots(pcigar);
+            length -= free;
+            pcigar = pcigar.checked_shl(2 * free as u32).unwrap_or(0);
+        }
+        for _ in 0..length {
+            if in_m || !affine {
+                while matches(v, h) {
+                    put(b'M');
+                    v += 1;
+                    h += 1;
+                }
+            }
+            let op = pcigar_extract(pcigar);
+            pcigar <<= 2;
+            let (ch, dv, dh, m) = match op {
+                1 => (b'D', 1, 0, false),
+                2 => (b'X', 1, 1, true),
+                3 => (b'I', 0, 1, false),
+                _ => (b'?', 0, 0, true),
+            };
+            if affine && !in_m && ch == b'X' {
+                in_m = true;
+                continue;
+            }
+            put(ch);
+            v += dv;
+            h += dh;
+            in_m = m;
+        }
+    }
+    // As C, a negative count (end behind the unpacked position) moves back.
+    let num_matches = (end.0 - v).min(end.1 - h);
+    for _ in 0..num_matches {
+        put(b'M');
+    }
+    v += num_matches;
+    h += num_matches;
+    while h < tlen {
+        put(b'I');
+        h += 1;
+    }
+    while v < plen {
+        put(b'D');
+        v += 1;
+    }
+    cigar.begin_offset = 0;
+    cigar.end_offset = n;
+}
 
 /// Outcome of a BiWFA breakpoint search or sub-alignment (C's `WF_STATUS_*`
 /// values inside `wavefront_bialign`).
@@ -154,6 +281,11 @@ fn with_band(h: &HeuristicStrategy, min_k: i32, max_k: i32) -> HeuristicStrategy
 /// only grow afterwards, so their capacity (the score limit in full-memory
 /// mode) is at least that for 1000 x 1000 -- heuristics can push an
 /// alignment past the bound computed for the actual lengths.
+/// C's default `max_memory_compact` (`BUFFER_SIZE_256M`).
+const MAX_MEMORY_COMPACT: u64 = 256 << 20;
+/// C's `probe_interval_compact` (6000; checked within the 3000 global
+/// interval, so every 6000 scores).
+const PROBE_INTERVAL_COMPACT: i32 = 6000;
 const PATTERN_LENGTH_INIT: i32 = 1000;
 const TEXT_LENGTH_INIT: i32 = 1000;
 
@@ -220,11 +352,75 @@ impl<const N: usize> WavefrontAligner<N> {
             extension: false,
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
+            memory_mode: MemoryMode::High,
+            max_memory_compact: MAX_MEMORY_COMPACT,
             max_alignment_steps: i32::MAX,
             biwfa_fwd: None,
             biwfa_rev: None,
             biwfa_base: None,
         }
+    }
+
+    /// Set the memory mode used for alignments (see [`MemoryMode`]).
+    pub fn set_memory_mode(&mut self, mode: MemoryMode) {
+        self.memory_mode = mode;
+    }
+
+    /// Set the backtrace-buffer size (bytes) above which the med/low modes
+    /// compact it (default 256 MB, fixed in C). Compaction only frees
+    /// memory; it doesn't change results.
+    pub fn set_max_memory_compact(&mut self, bytes: u64) {
+        self.max_memory_compact = bytes;
+    }
+
+    /// C's backtrace-buffer check in `wavefront_unialign_reached_limits`,
+    /// after computing `score`: every `PROBE_INTERVAL_COMPACT` scores,
+    /// compact the buffer if it exceeds `max_memory_compact`. After
+    /// `max_partial_compacts` compactions (4 for med, 1 for low) the next
+    /// one starts over from the first block.
+    #[inline(always)]
+    fn probe_bt_buffer(&mut self, score: i32) {
+        if !self.wf_components.bt_piggyback || score % PROBE_INTERVAL_COMPACT != 0 {
+            return;
+        }
+        self.compact_bt_buffer_if_needed(score);
+    }
+
+    #[cold]
+    fn compact_bt_buffer_if_needed(&mut self, score: i32) {
+        let Some(buf) = self.wf_components.bt_buffer.as_ref() else {
+            return;
+        };
+        if buf.get_size_used() <= self.max_memory_compact {
+            return;
+        }
+        self.wf_components.compact_bt_buffer(score as usize);
+        let max_partial_compacts = if self.memory_mode == MemoryMode::Low {
+            1
+        } else {
+            4
+        };
+        let buf = self.wf_components.bt_buffer.as_mut().unwrap();
+        if buf.num_compactions >= max_partial_compacts {
+            buf.reset_compaction();
+        }
+    }
+
+    /// Rebuild the components and slab with or without backtrace arrays and
+    /// a backtrace buffer (piggyback backtrace for the med/low modes).
+    fn set_piggyback(&mut self, piggyback: bool) {
+        self.wf_components = WavefrontComponents::<N>::new(
+            PATTERN_LENGTH_INIT,
+            TEXT_LENGTH_INIT,
+            &self.penalties,
+            piggyback,
+            piggyback,
+        );
+        let mut slab = WavefrontSlab::new(10, piggyback, SlabMode::Reuse);
+        if N == 5 {
+            slab.set_cache_coloring(24);
+        }
+        self.wavefront_slab = slab;
     }
 
     /// Set the maximum alignment steps (score limit).
@@ -330,6 +526,7 @@ impl<const N: usize> WavefrontAligner<N> {
                 self.status = AlignStatus::MaxStepsReached;
                 break;
             }
+            self.probe_bt_buffer(score);
         }
 
         // Record how many flat slots were used (for efficient clear on next alignment).
@@ -427,6 +624,7 @@ impl<const N: usize> WavefrontAligner<N> {
                 self.status = AlignStatus::MaxStepsReached;
                 break;
             }
+            self.probe_bt_buffer(score);
         }
 
         // Record how many flat slots were used (for efficient clear on next alignment).
@@ -495,8 +693,15 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Enable modular wavefront storage for score-only mode (like C reference).
         // This keeps only max_score_scope wavefronts alive, dramatically reducing
-        // memory usage and improving cache performance.
+        // memory usage and improving cache performance. Med/low alignments
+        // are modular too, with piggyback backtrace (C's
+        // `wavefront_aligner_init_alignment`).
         let score_only = self.alignment_scope == AlignmentScope::ComputeScore;
+        let piggyback = !score_only && self.memory_mode != MemoryMode::High;
+        if piggyback != self.wf_components.bt_piggyback {
+            self.set_piggyback(piggyback);
+        }
+        let score_only = score_only || piggyback;
         self.wf_components.memory_modular = score_only;
 
         // Resize components for sequence dimensions
@@ -565,6 +770,10 @@ impl<const N: usize> WavefrontAligner<N> {
             (*wf_ptr).set_offset(0, 0);
             (*wf_ptr).set_limits(0, 0);
         }
+        if let Some(buf) = self.wf_components.bt_buffer.as_mut() {
+            buf.clear();
+            unsafe { set_bt_init(&mut *wf_ptr, buf, 0, 0, 0) };
+        }
         // Ends-free with match == 0: the begin-free cells (h,0) and (0,v) are
         // all reachable at score 0 (C's `wavefront_aligner_init_wf_m`, with
         // C #126's restriction to ends-free span). For match != 0 they are
@@ -574,9 +783,15 @@ impl<const N: usize> WavefrontAligner<N> {
             unsafe {
                 for h in 1..=t0 {
                     (*wf_ptr).set_offset(h, h); // k = h, offset = h
+                    if let Some(buf) = self.wf_components.bt_buffer.as_mut() {
+                        set_bt_init(&mut *wf_ptr, buf, h, 0, h);
+                    }
                 }
                 for v in 1..=p0 {
                     (*wf_ptr).set_offset(-v, 0); // k = -v, offset = h = 0
+                    if let Some(buf) = self.wf_components.bt_buffer.as_mut() {
+                        set_bt_init(&mut *wf_ptr, buf, -v, v, 0);
+                    }
                 }
                 // C sets lo/hi only; the initialized range stays [0, 0]
                 // (widened later by the gap-metric `init_ends`, never by edit).
@@ -689,7 +904,48 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Backtrace the CIGAR from M-wavefront cell (`k`, `offset`), starting at
     /// `score` (C's `wavefront_unialign_terminate`).
     fn backtrace_from(&mut self, score: i32, k: i32, offset: WfOffset) {
-        self.backtrace_components(score, k, offset, ComponentType::M, ComponentType::M);
+        if self.wf_components.bt_piggyback {
+            self.backtrace_piggyback(score, k, offset);
+        } else {
+            self.backtrace_components(score, k, offset, ComponentType::M, ComponentType::M);
+        }
+    }
+
+    /// C's `wavefront_backtrace_pcigar` (med/low): follow the chain of
+    /// packed CIGARs from cell `k` of the M-wavefront at `score` back to its
+    /// initial position, then unpack it, re-extending matches. As in C, the
+    /// cell is read at the current score even for a Z-drop end found earlier.
+    fn backtrace_piggyback(&mut self, score: i32, k: i32, offset: WfOffset) {
+        let m = self.wf_components.get_m_ptr(score as usize);
+        // C reads the cell unchecked. After a Z-drop it may lie outside
+        // [lo, hi]: cells the kernel computed before trimming are as in C,
+        // but never-written ones hold leftovers of earlier alignments in C
+        // (zeroes in fresh memory), so C's result depends on what it aligned
+        // before (HPCBio/wfa2lib-rs#22). Rust reads them as zeroes, so each
+        // result is deterministic. A NULL wavefront crashes C; Rust returns
+        // an empty CIGAR.
+        if m.is_null() || !unsafe { (*m).is_allocated(k) } {
+            self.cigar.begin_offset = 0;
+            self.cigar.end_offset = 0;
+            return;
+        }
+        let (pcigar, prev) = unsafe { (*m).bt_or_zero(k) };
+        let buf = self.wf_components.bt_buffer.as_mut().unwrap();
+        let init = buf.traceback_from(pcigar, prev);
+        let init_pos = buf.alignment_init_pos[init.pcigar as usize];
+        let affine = matches!(
+            self.penalties.distance_metric,
+            DistanceMetric::GapAffine | DistanceMetric::GapAffine2p
+        );
+        unpack_piggyback(
+            &buf.alignment_packed,
+            &self.sequences,
+            (init_pos.v, init_pos.h),
+            (wavefront_v(k, offset), wavefront_h(k, offset)),
+            affine,
+            &mut self.cigar,
+        );
+        self.cigar.score = score;
     }
 
     /// `backtrace_from` between the given begin/end components (BiWFA halves).
@@ -895,10 +1151,9 @@ impl<const N: usize> WavefrontAligner<N> {
         // checks use it, so widening it would let the backtrace step onto
         // M0's begin-free diagonals, which C's does not.
         unsafe {
-            (*prev_ptr).set_offset_if_allocated(prev_lo - 2, OFFSET_NULL);
-            (*prev_ptr).set_offset_if_allocated(prev_lo - 1, OFFSET_NULL);
-            (*prev_ptr).set_offset_if_allocated(prev_hi + 1, OFFSET_NULL);
-            (*prev_ptr).set_offset_if_allocated(prev_hi + 2, OFFSET_NULL);
+            for k in [prev_lo - 2, prev_lo - 1, prev_hi + 1, prev_hi + 2] {
+                (*prev_ptr).set_null_cell_if_allocated(k);
+            }
         }
 
         // Allocate or reuse output wavefront
@@ -918,15 +1173,38 @@ impl<const N: usize> WavefrontAligner<N> {
         // Compute kernel
         let plen = self.sequences.pattern_length;
         let tlen = self.sequences.text_length;
+        let indel = match self.penalties.distance_metric {
+            DistanceMetric::Edit => false,
+            DistanceMetric::Indel => true,
+            _ => unreachable!("compute_edit_step called for non-edit metric"),
+        };
         unsafe {
-            match self.penalties.distance_metric {
-                DistanceMetric::Edit => {
-                    edit::compute_edit_idm(plen, tlen, &*prev_ptr, &mut *curr_ptr, lo, hi);
+            match (self.wf_components.bt_buffer.as_mut(), indel) {
+                (None, false) => {
+                    edit::compute_edit_idm(plen, tlen, &*prev_ptr, &mut *curr_ptr, lo, hi)
                 }
-                DistanceMetric::Indel => {
-                    edit::compute_indel_idm(plen, tlen, &*prev_ptr, &mut *curr_ptr, lo, hi);
+                (None, true) => {
+                    edit::compute_indel_idm(plen, tlen, &*prev_ptr, &mut *curr_ptr, lo, hi)
                 }
-                _ => unreachable!("compute_edit_step called for non-edit metric"),
+                (Some(buf), _) => {
+                    if indel {
+                        piggyback::compute_indel_idm(
+                            plen,
+                            tlen,
+                            &*prev_ptr,
+                            &mut *curr_ptr,
+                            lo,
+                            hi,
+                        );
+                    } else {
+                        piggyback::compute_edit_idm(plen, tlen, &*prev_ptr, &mut *curr_ptr, lo, hi);
+                    }
+                    // C offloads edit/indel every PCIGAR_MAX_LENGTH scores.
+                    if score % PCIGAR_MAX_LENGTH as i32 == 0 {
+                        let low = self.memory_mode == MemoryMode::Low;
+                        piggyback::offload_blocks_linear(&mut *curr_ptr, lo, hi, low, buf);
+                    }
+                }
             }
         }
 
@@ -1034,15 +1312,37 @@ impl<const N: usize> WavefrontAligner<N> {
             let wf_misms_cptr = if !misms_ptr.is_null() { misms_ptr as *const _ } else { null_wf };
             let wf_gap_cptr = if !gap_ptr.is_null() { gap_ptr as *const _ } else { null_wf };
 
-            linear::compute_linear_idm(
-                plen,
-                tlen,
-                &*wf_misms_cptr,
-                &*wf_gap_cptr,
-                &mut *curr_ptr,
-                lo,
-                hi,
-            );
+            if let Some(buf) = self.wf_components.bt_buffer.as_mut() {
+                piggyback::compute_linear_idm(
+                    plen,
+                    tlen,
+                    &*wf_misms_cptr,
+                    &*wf_gap_cptr,
+                    &mut *curr_ptr,
+                    lo,
+                    hi,
+                );
+                let low = self.memory_mode == MemoryMode::Low;
+                piggyback::offload_linear(
+                    &*wf_misms_cptr,
+                    &*wf_gap_cptr,
+                    &mut *curr_ptr,
+                    lo,
+                    hi,
+                    low,
+                    buf,
+                );
+            } else {
+                linear::compute_linear_idm(
+                    plen,
+                    tlen,
+                    &*wf_misms_cptr,
+                    &*wf_gap_cptr,
+                    &mut *curr_ptr,
+                    lo,
+                    hi,
+                );
+            }
         }
 
         // Store in components
@@ -1204,19 +1504,49 @@ impl<const N: usize> WavefrontAligner<N> {
             (*i1_curr_ptr).set_limits(lo, hi);
             (*d1_curr_ptr).set_limits(lo, hi);
 
-            affine::compute_affine_idm(
-                plen,
-                tlen,
-                &*wf_m_misms,
-                &*wf_m_open,
-                &*wf_i1_ext,
-                &*wf_d1_ext,
-                &mut *m_curr_ptr,
-                &mut *i1_curr_ptr,
-                &mut *d1_curr_ptr,
-                lo,
-                hi,
-            );
+            if let Some(buf) = self.wf_components.bt_buffer.as_mut() {
+                piggyback::compute_affine_idm(
+                    plen,
+                    tlen,
+                    &*wf_m_misms,
+                    &*wf_m_open,
+                    &*wf_i1_ext,
+                    &*wf_d1_ext,
+                    &mut *m_curr_ptr,
+                    &mut *i1_curr_ptr,
+                    &mut *d1_curr_ptr,
+                    lo,
+                    hi,
+                );
+                let low = self.memory_mode == MemoryMode::Low;
+                piggyback::offload_affine(
+                    &*wf_m_misms,
+                    &*wf_m_open,
+                    &*wf_i1_ext,
+                    &*wf_d1_ext,
+                    &mut *m_curr_ptr,
+                    &mut *i1_curr_ptr,
+                    &mut *d1_curr_ptr,
+                    lo,
+                    hi,
+                    low,
+                    buf,
+                );
+            } else {
+                affine::compute_affine_idm(
+                    plen,
+                    tlen,
+                    &*wf_m_misms,
+                    &*wf_m_open,
+                    &*wf_i1_ext,
+                    &*wf_d1_ext,
+                    &mut *m_curr_ptr,
+                    &mut *i1_curr_ptr,
+                    &mut *d1_curr_ptr,
+                    lo,
+                    hi,
+                );
+            }
         }
 
         // Store in components using pre-computed slot
@@ -1459,19 +1789,50 @@ impl<const N: usize> WavefrontAligner<N> {
                 let wf_i1_ext_ref = if !ptr_i1_ext.is_null() { ptr_i1_ext as *const _ } else { null_wf };
                 let wf_d1_ext_ref = if !ptr_d1_ext.is_null() { ptr_d1_ext as *const _ } else { null_wf };
 
-                affine::compute_affine_idm(
-                    plen,
-                    tlen,
-                    &*wf_m_misms,
-                    &*wf_m_open1,
-                    &*wf_i1_ext_ref,
-                    &*wf_d1_ext_ref,
-                    &mut *m_curr_ptr,
-                    &mut *i1_curr_ptr,
-                    &mut *d1_curr_ptr,
-                    lo,
-                    hi,
-                );
+                if let Some(buf) = self.wf_components.bt_buffer.as_mut() {
+                    piggyback::compute_affine_idm(
+                        plen,
+                        tlen,
+                        &*wf_m_misms,
+                        &*wf_m_open1,
+                        &*wf_i1_ext_ref,
+                        &*wf_d1_ext_ref,
+                        &mut *m_curr_ptr,
+                        &mut *i1_curr_ptr,
+                        &mut *d1_curr_ptr,
+                        lo,
+                        hi,
+                    );
+                    // I2/D2 have no inputs, so their occupancy (C) is 0: no offload.
+                    let low = self.memory_mode == MemoryMode::Low;
+                    piggyback::offload_affine(
+                        &*wf_m_misms,
+                        &*wf_m_open1,
+                        &*wf_i1_ext_ref,
+                        &*wf_d1_ext_ref,
+                        &mut *m_curr_ptr,
+                        &mut *i1_curr_ptr,
+                        &mut *d1_curr_ptr,
+                        lo,
+                        hi,
+                        low,
+                        buf,
+                    );
+                } else {
+                    affine::compute_affine_idm(
+                        plen,
+                        tlen,
+                        &*wf_m_misms,
+                        &*wf_m_open1,
+                        &*wf_i1_ext_ref,
+                        &*wf_d1_ext_ref,
+                        &mut *m_curr_ptr,
+                        &mut *i1_curr_ptr,
+                        &mut *d1_curr_ptr,
+                        lo,
+                        hi,
+                    );
+                }
             } else {
                 // Full affine2p kernel (5 components)
                 let wf_m_open2 = if !ptr_m_open2.is_null() { ptr_m_open2 as *const _ } else { null_wf };
@@ -1483,24 +1844,64 @@ impl<const N: usize> WavefrontAligner<N> {
                 if i2_stored { (*i2_curr_ptr).set_limits(lo, hi); }
                 if d2_stored { (*d2_curr_ptr).set_limits(lo, hi); }
 
-                affine2p::compute_affine2p_idm(
-                    plen,
-                    tlen,
-                    &*wf_m_misms,
-                    &*wf_m_open1,
-                    &*wf_m_open2,
-                    &*wf_i1_ext_ref,
-                    &*wf_i2_ext_ref,
-                    &*wf_d1_ext_ref,
-                    &*wf_d2_ext_ref,
-                    &mut *m_curr_ptr,
-                    &mut *i1_curr_ptr,
-                    &mut *i2_curr_ptr,
-                    &mut *d1_curr_ptr,
-                    &mut *d2_curr_ptr,
-                    lo,
-                    hi,
-                );
+                if let Some(buf) = self.wf_components.bt_buffer.as_mut() {
+                    piggyback::compute_affine2p_idm(
+                        plen,
+                        tlen,
+                        &*wf_m_misms,
+                        &*wf_m_open1,
+                        &*wf_m_open2,
+                        &*wf_i1_ext_ref,
+                        &*wf_i2_ext_ref,
+                        &*wf_d1_ext_ref,
+                        &*wf_d2_ext_ref,
+                        &mut *m_curr_ptr,
+                        &mut *i1_curr_ptr,
+                        &mut *i2_curr_ptr,
+                        &mut *d1_curr_ptr,
+                        &mut *d2_curr_ptr,
+                        lo,
+                        hi,
+                    );
+                    let low = self.memory_mode == MemoryMode::Low;
+                    piggyback::offload_affine2p(
+                        &*wf_m_misms,
+                        &*wf_m_open1,
+                        &*wf_m_open2,
+                        &*wf_i1_ext_ref,
+                        &*wf_i2_ext_ref,
+                        &*wf_d1_ext_ref,
+                        &*wf_d2_ext_ref,
+                        &mut *m_curr_ptr,
+                        &mut *i1_curr_ptr,
+                        &mut *i2_curr_ptr,
+                        &mut *d1_curr_ptr,
+                        &mut *d2_curr_ptr,
+                        lo,
+                        hi,
+                        low,
+                        buf,
+                    );
+                } else {
+                    affine2p::compute_affine2p_idm(
+                        plen,
+                        tlen,
+                        &*wf_m_misms,
+                        &*wf_m_open1,
+                        &*wf_m_open2,
+                        &*wf_i1_ext_ref,
+                        &*wf_i2_ext_ref,
+                        &*wf_d1_ext_ref,
+                        &*wf_d2_ext_ref,
+                        &mut *m_curr_ptr,
+                        &mut *i1_curr_ptr,
+                        &mut *i2_curr_ptr,
+                        &mut *d1_curr_ptr,
+                        &mut *d2_curr_ptr,
+                        lo,
+                        hi,
+                    );
+                }
             }
         }
 
@@ -1718,6 +2119,8 @@ impl<const N: usize> WavefrontAligner<N> {
             extension: false,
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
+            memory_mode: MemoryMode::High,
+            max_memory_compact: MAX_MEMORY_COMPACT,
             max_alignment_steps: i32::MAX,
             biwfa_fwd: None,
             biwfa_rev: None,
@@ -2253,33 +2656,49 @@ impl<const N: usize> WavefrontAligner<N> {
     /// C's `wavefront_compute_endsfree_init`: add the begin-free cells on
     /// diagonals `k` (text) and `-k` (pattern) to a computed M-wavefront,
     /// before its ends are trimmed.
-    fn endsfree_init(&self, wf: &mut crate::wavefront::Wavefront, k: i32) {
+    fn endsfree_init(&mut self, wf: &mut crate::wavefront::Wavefront, k: i32) {
         let (lo, hi) = (wf.lo, wf.hi);
         if self.text_begin_free >= k {
             if hi >= k {
                 if wf.get_offset(k) <= k {
-                    wf.set_offset(k, k); // (h, v) = (k, 0)
+                    self.endsfree_init_offset(wf, k, 0, k); // (h, v) = (k, 0)
                 }
             } else {
                 for kk in hi + 1..k {
-                    wf.set_offset(kk, OFFSET_NULL);
+                    wf.set_null_cell(kk);
                 }
-                wf.set_offset(k, k);
+                self.endsfree_init_offset(wf, k, 0, k);
                 wf.hi = k;
             }
         }
         if self.pattern_begin_free >= k {
             if lo <= -k {
                 if wf.get_offset(-k) <= 0 {
-                    wf.set_offset(-k, 0); // (h, v) = (0, k)
+                    self.endsfree_init_offset(wf, -k, k, 0); // (h, v) = (0, k)
                 }
             } else {
-                wf.set_offset(-k, 0);
+                self.endsfree_init_offset(wf, -k, k, 0);
                 for kk in -k + 1..lo {
-                    wf.set_offset(kk, OFFSET_NULL);
+                    wf.set_null_cell(kk);
                 }
                 wf.lo = -k;
             }
+        }
+    }
+
+    /// C's `wavefront_compute_endsfree_init_offset`: set a begin-free cell
+    /// (v, h) on diagonal `k`, starting a backtrace chain there if piggyback.
+    fn endsfree_init_offset(
+        &mut self,
+        wf: &mut crate::wavefront::Wavefront,
+        k: i32,
+        v: i32,
+        h: i32,
+    ) {
+        wf.set_offset(k, h);
+        if let Some(buf) = self.wf_components.bt_buffer.as_mut() {
+            set_bt_init(wf, buf, k, v, h);
+            wf.mark_written(k, k);
         }
     }
 
@@ -2299,13 +2718,13 @@ impl<const N: usize> WavefrontAligner<N> {
         let wf_ptr = self.wavefront_slab.allocate_ptr(hist_lo, hist_hi);
         let wf = unsafe { &mut *wf_ptr };
         for kk in lo..=hi {
-            wf.set_offset(kk, OFFSET_NULL);
+            wf.set_null_cell(kk);
         }
         if text {
-            wf.set_offset(k, k);
+            self.endsfree_init_offset(wf, k, 0, k);
         }
         if pattern {
-            wf.set_offset(-k, 0);
+            self.endsfree_init_offset(wf, -k, k, 0);
         }
         wf.set_limits(lo, hi);
         wf_ptr
@@ -3191,6 +3610,50 @@ mod tests {
         text.remove(120);
         text.insert(200, b'G');
         (pattern, text)
+    }
+
+    #[test]
+    fn test_piggyback_compaction_keeps_alignment() {
+        // Unrelated 3 kb sequences: affine score ~6900, past the first
+        // compaction probe (score 6000).
+        let mut x = 7u32;
+        let mut seq = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                    b"ACGT"[(x >> 16) as usize % 4]
+                })
+                .collect()
+        };
+        let (pattern, text) = (seq(3000), seq(3000));
+        let align = |mode: MemoryMode, compact_at: u64| {
+            let mut a = AffineAligner::new(WavefrontPenalties::new_affine(
+                crate::penalties::AffinePenalties {
+                    match_: 0,
+                    mismatch: 4,
+                    gap_opening: 6,
+                    gap_extension: 2,
+                },
+            ));
+            a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+            a.set_memory_mode(mode);
+            a.set_max_memory_compact(compact_at);
+            let score = a.align_end2end(&pattern, &text);
+            assert!(
+                score > 6000,
+                "score {score} must reach the compaction probe"
+            );
+            let compactions = a.wf_components.bt_buffer.as_ref().unwrap().num_compactions;
+            (a.cigar().to_string_rle(true), compactions)
+        };
+        for mode in [MemoryMode::Med, MemoryMode::Low] {
+            let (plain, n) = align(mode, u64::MAX);
+            assert_eq!(n, 0);
+            let (compacted, n) = align(mode, 0);
+            assert_eq!(compacted, plain, "{mode:?}");
+            // Med keeps counting compactions; low resets after each one.
+            assert_eq!(n, if mode == MemoryMode::Med { 1 } else { 0 });
+        }
     }
 
     #[test]

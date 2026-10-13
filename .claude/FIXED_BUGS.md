@@ -272,3 +272,74 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   and long, with and without heuristics.
 - **Test:** `tests/cli_output.rs::biwfa_match_reward_tie_breaks_match_c`
   (`wfa.utest.seq` pair 298).
+
+## 10. `--wfa-memory=med|low` behaved like `high` (no piggyback backtrace)
+
+- **Symptom:** `med` and `low` gave `high`'s results and memory use. C's
+  `med`/`low` record the alignment alongside the wavefronts ("piggyback"
+  backtrace) and keep only the wavefronts still needed. That can pick a
+  different co-optimal path, and C's heuristic results differ between the
+  modes (all X-drop/Z-drop `med` cells of the matrix differed).
+- **C design ported** (`wavefront_compute_*_piggyback`,
+  `wavefront_backtrace_offload.c`, `wavefront_backtrace_buffer.c`,
+  `wavefront_pcigar.c`):
+  - Each cell carries a 16-operation packed CIGAR (`pcigar`) and the index
+    of the backtrace block it continues (`bt_prev`). The kernels copy them
+    from the winning predecessor with C's tie order and push the operation.
+    Matches aren't stored; unpacking re-extends them.
+  - When a component's occupancy nears 16 operations, live cells' pcigars
+    move to the backtrace buffer (`med`: at 9+ operations; `low`: when full,
+    or 15+ for affine). Edit/indel offload every 16 scores.
+  - Initial cells (score 0, ends-free begin cells) start chains at init
+    blocks holding their (v, h).
+  - Unpacking reproduces C exactly, including: begin I/D before the first
+    block; padding to the sequence ends with matches then I/D; the dropped X
+    after I/D (gap close); and a negative match count moving the position
+    back.
+  - After a Z-drop, C reads the end cell from the *current* score's
+    wavefront, not the drop score's (see below).
+- **Rust specifics:**
+  - Kernels are split into per-component passes over slices (noalias), so
+    they vectorize as C's `PRAGMA_LOOP_VECTORIZE` loops do. A fused
+    raw-pointer loop ran at 40+ ns per cell from false store/load aliasing.
+  - Backtrace-buffer segments commit memory as blocks are stored (C:
+    `calloc`). The first version zero-filled 64 MB per aligner.
+- **#22 root cause (C bug, not reproducible):** after a Z-drop, C backtraces
+  from the end diagonal in the current score's M-wavefront. That cell is
+  often dead (NULL offset) or outside the computed range, so its chain comes
+  from memory C never initialized: leftovers of earlier steps or earlier
+  alignments, or zeroes in fresh memory. C's result for a pair then depends
+  on what it aligned before. Rust reads never-written cells, and the NULL
+  padding the kernels read, as zeroes. Each result is deterministic and
+  matches C with fresh memory (pair aligned alone) in all but a few cases.
+- **Result:**
+  - `med`/`low` × {edit, indel, linear, affine, affine match < 0, affine
+    `0,1,2,1`, affine2p} × {utest, long}: 28/28 byte-identical to C 3282f83.
+  - X-drop/Z-drop matrix: 556/576 (was 450). The other 20 are Z-drop `med`
+    with affine match < 0 (C's uninitialized reads above).
+  - 50k × 1 kb: byte-identical to C, and faster than C (affine `med` 8.3 s
+    vs 11.0 s). Max RSS 3.6 MB (`high`: 11.3 MB).
+- **Tests:** `tests/cli_output.rs::memory_med_low_match_c` (fixtures in
+  `tests/data/`).
+
+## 11. Backtrace buffer never compacted (med/low)
+
+- **Symptom:** with piggyback backtrace, the backtrace buffer only grows. C
+  compacts it during long alignments, so `med`/`low` stay bounded.
+- **C design ported** (`wavefront_unialign_reached_limits`,
+  `wavefront_components_compact_bt_buffer`,
+  `wf_backtrace_buffer_compact_marked`):
+  - Every 6000 scores, if the buffer exceeds `max_memory_compact` (256 MB),
+    C marks the blocks reachable from live cells of the wavefronts still in
+    scope. It moves those blocks down after the already compacted ones,
+    translating their `prev` indices by exclusive rank, and translates the
+    cells' indices.
+  - After `max_partial_compacts` compactions (4 for `med`, 1 for `low`),
+    the next one starts over from block 0.
+  - C quirks kept: the compacted-block count is set one short (the last
+    index); only live cells are translated; and the "telescopic" limit
+    update assigns a local, so the threshold stays 256 MB.
+- **Rust:** `set_max_memory_compact` exposes the threshold (fixed in C) so
+  compaction can be tested on small inputs. It never changes results.
+- **Test:** `aligner::tests::test_piggyback_compaction_keeps_alignment`
+  (forced compaction at score 6000 gives the same CIGAR, `med` and `low`).

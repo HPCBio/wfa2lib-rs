@@ -51,17 +51,10 @@ pub struct BacktraceBuffer {
 impl BacktraceBuffer {
     /// Create a new backtrace buffer.
     pub fn new() -> Self {
-        let initial_segment = vec![
-            BtBlock {
-                pcigar: 0,
-                prev_idx: BT_BLOCK_IDX_NULL,
-            };
-            BT_BUFFER_SEGMENT_LENGTH
-        ];
         Self {
             segment_idx: 0,
             segment_offset: 0,
-            segments: vec![initial_segment],
+            segments: vec![new_segment()],
             alignment_init_pos: Vec::with_capacity(100),
             num_compacted_blocks: 0,
             num_compactions: 0,
@@ -121,7 +114,13 @@ impl BacktraceBuffer {
         let global_idx =
             (self.segment_idx * BT_BUFFER_SEGMENT_LENGTH + self.segment_offset) as BtBlockIdx;
 
-        self.segments[self.segment_idx][self.segment_offset] = BtBlock { pcigar, prev_idx };
+        let block = BtBlock { pcigar, prev_idx };
+        let segment = &mut self.segments[self.segment_idx];
+        if self.segment_offset < segment.len() {
+            segment[self.segment_offset] = block;
+        } else {
+            segment.push(block); // Commits memory only as it is used
+        }
 
         self.segment_offset += 1;
         if self.segment_offset >= BT_BUFFER_SEGMENT_LENGTH {
@@ -146,13 +145,32 @@ impl BacktraceBuffer {
             (self.segment_idx * BT_BUFFER_SEGMENT_LENGTH + self.segment_offset) as BtBlockIdx;
         let available = BT_BUFFER_SEGMENT_LENGTH - self.segment_offset;
         let offset = self.segment_offset;
-        let slice = &mut self.segments[self.segment_idx][offset..];
+        // Hand out the whole free segment (committing it).
+        let segment = &mut self.segments[self.segment_idx];
+        segment.resize(
+            BT_BUFFER_SEGMENT_LENGTH,
+            BtBlock {
+                pcigar: 0,
+                prev_idx: 0,
+            },
+        );
+        let slice = &mut segment[offset..];
         (global_idx, slice, available)
     }
 
     /// Advance the write position by `used` blocks.
     pub fn add_used(&mut self, used: usize) {
         self.segment_offset += used;
+        let segment = &mut self.segments[self.segment_idx];
+        if segment.len() < self.segment_offset.min(BT_BUFFER_SEGMENT_LENGTH) {
+            segment.resize(
+                self.segment_offset.min(BT_BUFFER_SEGMENT_LENGTH),
+                BtBlock {
+                    pcigar: 0,
+                    prev_idx: 0,
+                },
+            );
+        }
         if self.segment_offset >= BT_BUFFER_SEGMENT_LENGTH {
             self.reserve_next_segment();
         }
@@ -170,6 +188,23 @@ impl BacktraceBuffer {
         }
 
         // Return the initial block (contains init_pos index in pcigar field)
+        block
+    }
+
+    /// C's `wf_backtrace_buffer_traceback_pcigar` from an end cell's
+    /// `(pcigar, prev)`: collect the pcigars back to the initial block (end
+    /// first) into `alignment_packed`, and return the initial block, whose
+    /// `pcigar` indexes `alignment_init_pos`.
+    pub fn traceback_from(&mut self, pcigar_last: Pcigar, prev_last: BtBlockIdx) -> BtBlock {
+        self.alignment_packed.clear();
+        let mut block = BtBlock {
+            pcigar: pcigar_last,
+            prev_idx: prev_last,
+        };
+        while block.prev_idx != BT_BLOCK_IDX_NULL {
+            self.alignment_packed.push(block.pcigar);
+            block = self.get_block(block.prev_idx);
+        }
         block
     }
 
@@ -193,15 +228,105 @@ impl BacktraceBuffer {
                 "BacktraceBuffer: reached maximum addressable index"
             );
 
-            self.segments.push(vec![
-                BtBlock {
-                    pcigar: 0,
-                    prev_idx: BT_BLOCK_IDX_NULL,
-                };
-                BT_BUFFER_SEGMENT_LENGTH
-            ]);
+            self.segments.push(new_segment());
         }
     }
+}
+
+/// Bitmap over block indices with exclusive rank (C's `bitmap_t`, used to
+/// compact the buffer).
+pub struct Bitmap {
+    words: Vec<u64>,
+    /// Set bits in all words before each word (after `update_counters`).
+    counters: Vec<u64>,
+}
+
+impl Bitmap {
+    /// A cleared bitmap for indices `[0, length)`.
+    pub fn new(length: u64) -> Self {
+        let n = length.div_ceil(64) as usize;
+        Self {
+            words: vec![0; n],
+            counters: vec![0; n],
+        }
+    }
+
+    /// Set bit `idx`; return whether it was already set (C's
+    /// `bitmap_check__set`).
+    #[inline]
+    pub fn check_set(&mut self, idx: BtBlockIdx) -> bool {
+        let (w, b) = ((idx / 64) as usize, idx % 64);
+        let was = self.words[w] >> b & 1 == 1;
+        self.words[w] |= 1 << b;
+        was
+    }
+
+    /// Whether bit `idx` is set.
+    #[inline]
+    pub fn is_set(&self, idx: BtBlockIdx) -> bool {
+        self.words[(idx / 64) as usize] >> (idx % 64) & 1 == 1
+    }
+
+    /// Recompute the per-word counters (C's `bitmap_update_counters`).
+    pub fn update_counters(&mut self) {
+        let mut total = 0;
+        for (c, w) in self.counters.iter_mut().zip(&self.words) {
+            *c = total;
+            total += w.count_ones() as u64;
+        }
+    }
+
+    /// Number of set bits before `idx` (C's `bitmap_erank`).
+    #[inline]
+    pub fn erank(&self, idx: BtBlockIdx) -> u64 {
+        let (w, b) = ((idx / 64) as usize, idx % 64);
+        self.counters[w] + (self.words[w] & ((1u64 << b) - 1)).count_ones() as u64
+    }
+}
+
+impl BacktraceBuffer {
+    /// Mark the chain of blocks from `idx` (C's
+    /// `wf_backtrace_buffer_mark_backtrace_batch`, one cell): stop at an
+    /// already marked block, NULL, or an already compacted block.
+    pub fn mark_chain(&self, idx: BtBlockIdx, bitmap: &mut Bitmap) {
+        let mut idx = idx;
+        while idx != BT_BLOCK_IDX_NULL && idx >= self.num_compacted_blocks {
+            if bitmap.check_set(idx) {
+                return;
+            }
+            idx = self.get_block(idx).prev_idx;
+        }
+    }
+
+    /// C's `wf_backtrace_buffer_compact_marked`: move the marked blocks
+    /// down after the compacted ones, translating their `prev_idx`. Returns
+    /// C's value, the last written index (one short of the block count).
+    pub fn compact_marked(&mut self, bitmap: &Bitmap) -> BtBlockIdx {
+        let compacted = self.num_compacted_blocks;
+        let max_block_idx = self.get_used() as BtBlockIdx;
+        let mut write = compacted;
+        for read in compacted..max_block_idx {
+            if bitmap.is_set(read) {
+                let mut block = self.get_block(read);
+                let prev = block.prev_idx;
+                if prev != BT_BLOCK_IDX_NULL && prev >= compacted {
+                    block.prev_idx = compacted + bitmap.erank(prev) as BtBlockIdx;
+                }
+                self.set_block(write, block);
+                write += 1;
+            }
+        }
+        self.segment_idx = write as usize / BT_BUFFER_SEGMENT_LENGTH;
+        self.segment_offset = write as usize % BT_BUFFER_SEGMENT_LENGTH;
+        self.num_compactions += 1;
+        write.wrapping_sub(1)
+    }
+}
+
+/// An empty segment with room for `BT_BUFFER_SEGMENT_LENGTH` blocks. Like
+/// C's `calloc`'d segments, memory is only committed as blocks are stored.
+fn new_segment() -> Vec<BtBlock> {
+    Vec::with_capacity(BT_BUFFER_SEGMENT_LENGTH)
 }
 
 impl Default for BacktraceBuffer {
