@@ -269,3 +269,75 @@ fn streams_to_stdout_and_keeps_results_written_before_an_error() {
     assert!(!out.status.success());
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "-16\t10M5I\n");
 }
+
+/// 300 bp pairs (DROP_PAIRS concatenated), long enough for BiWFA to split at
+/// breakpoints instead of falling back to unidirectional WFA.
+fn biwfa_pairs() -> [(String, String); 2] {
+    let [(p1, t1), (p2, t2)] = DROP_PAIRS;
+    [
+        ([p1, p2, p1].concat(), [t1, t2, t1].concat()),
+        ([p2, p1, p2].concat(), [t2, t1, t2].concat()),
+    ]
+}
+
+fn biwfa(name: &str, heuristic: &str, params: &str, extra: &[&str]) -> Vec<String> {
+    let pairs = biwfa_pairs();
+    let pairs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let h = format!("--wfa-heuristic={heuristic}");
+    let p = format!("--wfa-heuristic-parameters={params}");
+    let mut args = vec!["-a", "gap-affine-wfa", "--wfa-memory=ultralow", &h, &p];
+    args.extend_from_slice(extra);
+    run(name, &pairs, &args)
+}
+
+#[test]
+fn biwfa_heuristics_match_c() {
+    // Expected outputs are from C's driver (3282f83). BiWFA previously ignored
+    // heuristics (pair 1 here aligned fully, -292).
+    let full = "3M1X3M1I17M1X1M1X8M1X2M1I1X11M1D3M1X16M1X2M1X5M1X20M2X2M1I4M1X1M3X3M1X4M1D3M1X13M1D6M1X1M1D11M1D4M1I6M3X4M1D6M2X7M1X7M1X3M1I17M1X1M1X8M1X2M1I1X11M1D3M1X16M1X2M1X5M1X19M";
+    let banded = ["-1\t-".to_string(), format!("-236\t{full}")];
+    assert_eq!(biwfa("bi_bs", "banded-static", "-2,2", &[]), banded);
+    assert_eq!(biwfa("bi_ba", "banded-adaptive", "-2,2,1", &[]), banded);
+    assert_eq!(biwfa("bi_xd", "xdrop", "20,1", &[]), ["-1\t-", "-1\t-"]);
+    // Score-only BiWFA only searches for the breakpoint; on failure C prints
+    // INT32_MIN.
+    assert_eq!(
+        biwfa("bi_xd_s", "xdrop", "20,1", &["--wfa-score-only"]),
+        ["-2147483648\t-", "-2147483648\t-"]
+    );
+    let m = ["--affine-penalties=-3,5,3,2", "--wfa-score-only"];
+    assert_eq!(
+        biwfa("bi_xd_ms", "xdrop", "100,1", &m),
+        ["539\t-", "589\t-"]
+    );
+}
+
+#[test]
+fn biwfa_match_reward_tie_breaks_match_c() {
+    // wfa.utest.seq pair 298. Sub-problems of at most 100 bp used to fall back
+    // to unidirectional WFA at every level; C checks the length only at the
+    // top level, which can pick a different co-optimal CIGAR (here 3D1X
+    // instead of 1X3D). Expected output from C's driver (3282f83).
+    let lines = run(
+        "bi_tie",
+        &[(
+            "AATGCCTCGGCTTCAGTAAGCAATGCCGGCCGTTTAACTGGTATGAAGAAATGATAGCTCGAGACTAAAGAGGGGGAACCTGGTTTTAAGGGCTAAACACTTGGG",
+            "AAGCTTTCGTTCGGTGAAACTTGTTGCGTGGTTACGACAGAAATGACGAGATCGTCCATAGCAGGCAGGACTAGGTGACGGCGTACACCAGACGGTAGGT",
+        )],
+        &[
+            "-a",
+            "gap-affine-wfa",
+            "--affine-penalties=-3,5,3,2",
+            "--wfa-memory=ultralow",
+        ],
+    );
+    assert_eq!(
+        lines,
+        [
+            "-3\t2M1D2M1X1M1I2M2D3M1X2M2D1M1X2M2I2M2X1M2D3M6D3M1I1M1X2M1I8M5D5M1I1M1I1M2I1M1X2M1I3M1I1X3M2D2M1I3M1X3D1M1X3M1I2M1X2M3I2M2I1M1X2M1X"
+        ]
+    );
+}

@@ -213,3 +213,62 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   drops_reject_what_c_rejects}`, `heuristic::tests::{test_compute_sw_scores_c_formula,
   test_drop_state_reset_uses_steps}`.
 
+
+## 8. BiWFA ignored heuristics; banded-adaptive and banded limits differed from C
+
+- **Symptom:** with `--wfa-memory=ultralow`, every heuristic was ignored: the
+  BiWFA sub-aligners and the base-case aligner ran unpruned. Separately,
+  banded-adaptive applied the static band every N steps, unlike C, and
+  unidirectional banded output followed the port baseline rather than C HEAD.
+- **Root causes:**
+  1. *Banded-adaptive.* C samples the wavefront at 4 points and shifts the
+     `[lo, hi]` window towards the furthest-reaching diagonals; Rust clamped
+     to the static band.
+  2. *smarco/WFA2-lib#125 (C 6565731 / 7ea485e).* C HEAD clamps computed
+     limits to `[min_k, max_k]` in `wavefront_compute_limits_heuristic`
+     (linear, affine, affine2p), and shifts the band into each BiWFA
+     sub-problem. C also creates components for 1000 × 1000 up front, which
+     decides whether a banded alignment runs out of score slots.
+  3. *BiWFA status handling.* C's forward and reverse aligners inherit the
+     heuristic (band shifted per sub-problem). Their extend step includes the
+     null-step check, termination and the cutoff. When one direction reaches
+     the end first, C falls back to unidirectional WFA if the end score is at
+     most `WF_BIALIGN_RECOVERY_MIN_SCORE` (500), and otherwise reports
+     unreachable. The base case takes the heuristic too (band shifted). It
+     appends its CIGAR whether or not it completed (empty, or max-trimmed
+     after a Z-drop), and a failure makes the whole alignment UNATTAINABLE.
+  4. *BiWFA score-only.* C's `wavefront_bialign_compute_score` only searches
+     for the breakpoint. On failure the score stays at `cigar_clear`'s
+     `INT32_MIN`. Rust ran unidirectional WFA, which gives the same score
+     without heuristics but not with them.
+- **Fix (branch `feat/biwfa-heuristics-banded`):** `19eac8b` (banded-adaptive),
+  `3b16283` (#125 clamp, C-sized components), then the BiWFA commit (status
+  plumbing via `BiStatus`, heuristic inheritance, base case as C's
+  `wavefront_unialign`, `align_biwfa_score`). BiWFA failures report
+  `AlignStatus::EndUnreachable`; C's UNATTAINABLE has no `AlignStatus`
+  equivalent, and adding one would change the public enum.
+- **CLI note:** C's driver uses −1 as "unset" for heuristic parameters, so it
+  rejects a band edge of −1 (e.g. `-1,1`). Rust accepts it.
+- **Result:** BiWFA × {none, banded-static, banded-adaptive, xdrop, zdrop,
+  wfa-adaptive} × {edit, linear, affine, affine match < 0, affine2p} ×
+  {CIGAR, score-only} × {utest, long}: 168/168 byte-identical to C 3282f83.
+  Before the fix, every heuristic run diverged.
+- **Tests:** `tests/cli_output.rs::biwfa_heuristics_match_c`,
+  `aligner::tests::{test_biwfa_band_excluding_end_is_unreachable,
+  test_biwfa_score_matches_end2end}`.
+
+## 9. BiWFA tie-breaks with match < 0 (HPCBio/wfa2lib-rs#7)
+
+- **Symptom:** 3 stock `wfa.utest.sh` BiWFA cases with match < 0 gave a
+  different co-optimal CIGAR than C (same score).
+- **Root cause:** Rust fell back to unidirectional WFA for any sub-problem of
+  at most 100 bp, at every recursion level. In C,
+  `WF_BIALIGN_FALLBACK_MIN_LENGTH` applies only at the top level; deeper
+  levels fall back only by score (`score_remaining <= 250`). Splitting at
+  different points can pick different co-optimal paths.
+- **Fix:** check the length only at the top level, as C does.
+- **Result:** stock `wfa.utest.sh` 60/60 identical (was 57/60, the other 3
+  matching by score only). BiWFA match < 0 is now byte-identical to C on utest
+  and long, with and without heuristics.
+- **Test:** `tests/cli_output.rs::biwfa_match_reward_tie_breaks_match_c`
+  (`wfa.utest.seq` pair 298).

@@ -194,11 +194,15 @@ pub fn heuristic_cutoff(
             max_k,
             steps_between_cutoffs,
         } => {
-            if state.steps_wait > 0 {
-                return false;
-            }
-            banded_static_cutoff(wf, *min_k, *max_k);
-            state.steps_wait = *steps_between_cutoffs;
+            banded_adaptive_cutoff(
+                state,
+                wf,
+                pattern_length,
+                text_length,
+                *min_k,
+                *max_k,
+                *steps_between_cutoffs,
+            );
             false
         }
     }
@@ -296,6 +300,53 @@ fn wfadaptive_reduce(
 }
 
 /// Static banding: clip wavefront to fixed diagonal range.
+/// Adaptive band (C's `wavefront_heuristic_banded_adaptive`): every
+/// `steps_between_cutoffs` steps, if the wavefront is wider than the band
+/// (`max_k - min_k + 1`), keep a band-wide window, shifted towards the end of
+/// the wavefront whose sampled diagonals are closer to the end of the
+/// alignment. Wavefronts shorter than 4 are left alone (without resetting the
+/// wait, as in C).
+fn banded_adaptive_cutoff(
+    state: &mut HeuristicState,
+    wf: &mut Wavefront,
+    pattern_length: i32,
+    text_length: i32,
+    min_k: i32,
+    max_k: i32,
+    steps_between_cutoffs: i32,
+) {
+    if state.steps_wait > 0 {
+        return;
+    }
+    let (lo, hi) = (wf.lo, wf.hi);
+    let wf_length = hi - lo + 1;
+    if wf_length < 4 {
+        return;
+    }
+    let max_wf_length = max_k - min_k + 1;
+    if wf_length > max_wf_length {
+        let leeway = (wf_length - max_wf_length) / 2;
+        let quarter = wf_length / 4;
+        let dist = |k: i32| wf_distance_end2end(wf.get_offset(k), k, pattern_length, text_length);
+        let (d0, d1, d2, d3) = (
+            dist(lo),
+            dist(lo + quarter),
+            dist(lo + 2 * quarter),
+            dist(hi),
+        );
+        let mut new_lo = lo;
+        if d0 > d3 {
+            new_lo += leeway;
+        }
+        if d1 > d2 {
+            new_lo += leeway;
+        }
+        wf.lo = new_lo.max(lo);
+        wf.hi = (new_lo + max_wf_length - 1).min(hi);
+    }
+    state.steps_wait = steps_between_cutoffs;
+}
+
 fn banded_static_cutoff(wf: &mut Wavefront, min_k: i32, max_k: i32) {
     if wf.lo < min_k {
         wf.lo = min_k;

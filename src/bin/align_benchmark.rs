@@ -328,6 +328,22 @@ impl AnyAligner {
         }
     }
 
+    fn align_biwfa_score(&mut self, pattern: &[u8], text: &[u8]) -> i32 {
+        match self {
+            AnyAligner::N1(a) => a.align_biwfa_score(pattern, text),
+            AnyAligner::N3(a) => a.align_biwfa_score(pattern, text),
+            AnyAligner::N5(a) => a.align_biwfa_score(pattern, text),
+        }
+    }
+
+    fn status(&self) -> AlignStatus {
+        match self {
+            AnyAligner::N1(a) => a.status(),
+            AnyAligner::N3(a) => a.status(),
+            AnyAligner::N5(a) => a.status(),
+        }
+    }
+
     fn align_endsfree(&mut self, pattern: &[u8], text: &[u8]) -> i32 {
         match self {
             AnyAligner::N1(a) => a.align_endsfree(pattern, text),
@@ -515,7 +531,8 @@ fn main() {
         total += 1;
         let t0 = std::time::Instant::now();
         let wfa_score = match span {
-            Span::Global if use_biwfa && !score_only => aligner.align_biwfa(pattern, text),
+            Span::Global if use_biwfa && score_only => aligner.align_biwfa_score(pattern, text),
+            Span::Global if use_biwfa => aligner.align_biwfa(pattern, text),
             Span::Global => aligner.align_end2end(pattern, text),
             Span::Extension => aligner.align_endsfree(pattern, text),
             Span::EndsFree([p0, pf, t0, tf]) => {
@@ -547,17 +564,30 @@ fn main() {
         };
         align_nanos += t0.elapsed().as_nanos() as u64;
 
-        let (end_v, end_h) = aligner
-            .unreached_end()
-            .unwrap_or((pattern.len() as i32, text.len() as i32));
-        let output_score = compute_output_score(
-            aligner.cigar(),
-            wfa_score,
-            &penalties,
-            score_only,
-            end_v,
-            end_h,
-        );
+        let biwfa_score_failed =
+            use_biwfa && score_only && aligner.status() != AlignStatus::Completed;
+        let (end_v, end_h) = if use_biwfa {
+            // BiWFA always evaluates the score at the end (C's
+            // `wavefront_bialign_compute_score`).
+            (pattern.len() as i32, text.len() as i32)
+        } else {
+            aligner
+                .unreached_end()
+                .unwrap_or((pattern.len() as i32, text.len() as i32))
+        };
+        // C leaves a failed BiWFA score at `cigar_clear`'s INT32_MIN.
+        let output_score = if biwfa_score_failed {
+            i32::MIN
+        } else {
+            compute_output_score(
+                aligner.cigar(),
+                wfa_score,
+                &penalties,
+                score_only,
+                end_v,
+                end_h,
+            )
+        };
 
         // C prints "-" for an empty CIGAR (always the case in score-only mode).
         let cigar_str = if score_only || aligner.cigar().operations_slice().is_empty() {

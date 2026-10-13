@@ -452,6 +452,15 @@ pub fn bialign_overlap<const N: usize>(
 /// Fallback score threshold: below this, use standard unidirectional WFA.
 pub const BIALIGN_FALLBACK_MIN_SCORE: i32 = 250;
 
+/// Sequences no longer than this are aligned with unidirectional WFA
+/// (C's `WF_BIALIGN_FALLBACK_MIN_LENGTH`; top level only).
+pub const BIALIGN_FALLBACK_MIN_LENGTH: i32 = 100;
+
+/// When one direction reaches the end before the wavefronts overlap, fall
+/// back to unidirectional WFA if the end score is at most this
+/// (C's `WF_BIALIGN_RECOVERY_MIN_SCORE`); otherwise the end is unreachable.
+pub const BIALIGN_RECOVERY_MIN_SCORE: i32 = 500;
+
 #[cfg(test)]
 mod tests {
     use super::*;
