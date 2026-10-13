@@ -27,6 +27,9 @@ sync" below.
 
 ### Output parity with C (differential testing, HPCBio/wfa2lib-rs#10)
 
+Checked with `tests/differential/run.sh` (1262 cases against the C commit in
+`tests/differential/C_COMMIT`; accepted differences in `known_diffs.tsv`).
+
 | Configuration | vs C |
 |---|---|
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
@@ -103,3 +106,7 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - **2026-10-13:** HPCBio/wfa2lib-rs#8 `--wfa-memory=med|low`: ported C's
   piggyback backtrace (kernels, offloading, backtrace buffer, unpacking) and
   buffer compaction. Root cause of HPCBio/wfa2lib-rs#22 found.
+- **2026-10-13:** committed the differential harness (`tests/differential/`):
+  C built at a pinned commit, 1262 cases over metrics, spans, heuristics and
+  memory modes, with known differences listed (HPCBio/wfa2lib-rs#10). CI
+  proposed in HPCBio/wfa2lib-rs#29.

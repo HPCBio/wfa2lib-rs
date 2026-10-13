@@ -39,6 +39,14 @@ src/
   bialign.rs                   -- BiWFA breakpoint detection (overlap kernels)
   bin/
     align_benchmark.rs         -- CLI driver binary
+tests/
+  cli_output.rs                -- CLI output tests (expected outputs from C)
+  test_vs_reference.rs         -- library vs C reference outputs
+  wfa_utest.sh                 -- stock C unit tests on the Rust CLI
+  data/                        -- CLI test fixtures
+  differential/                -- Rust-vs-C differential harness (run.sh,
+                                  cases.sh, build_c.sh, C_COMMIT, known_diffs.tsv)
+bench/                         -- Rust-vs-C timing scripts
 ```
 
 Planned but not separate modules: the unidirectional loop and the BiWFA
@@ -251,7 +259,8 @@ banded path crashes.
 
 **Per-change validation:**
 - stock `wfa.utest.sh`;
-- the differential matrix (non-heuristic configs must stay byte-identical to C);
+- the differential matrix, `tests/differential/run.sh` (no differences beyond
+  `known_diffs.tsv`);
 - banded parity against C HEAD (smarco/WFA2-lib#125 is ported);
 - a debug build plus Guard Malloc (macOS) for memory-safety fixes;
 - a regression test that fails on the parent commit;

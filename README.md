@@ -77,6 +77,11 @@ bash tests/wfa_utest.sh   # Rust align_benchmark vs WFA2-lib/tests/wfa.utest.che
 Without it, `tests/test_vs_reference.rs` fails with "failed to read sequence
 file". The CLI tests (`tests/cli_output.rs`, `cli` feature) need no checkout.
 
+For broader parity checks, `tests/differential/run.sh` builds C's
+`align_benchmark` at a pinned commit and compares it with Rust's on about
+1300 configurations (metrics, spans, heuristics, memory modes); see
+[`tests/differential/README.md`](tests/differential/README.md).
+
 ## Usage
 
 ### As a library
@@ -169,6 +174,13 @@ src/
   termination.rs      # Alignment termination conditions
   bin/
     align_benchmark.rs  # CLI binary
+tests/
+  cli_output.rs       # CLI output tests (expected outputs from C)
+  test_vs_reference.rs  # Library vs C reference outputs (needs ./WFA2-lib)
+  wfa_utest.sh        # Stock C unit tests on the Rust CLI (needs ./WFA2-lib)
+  data/               # Fixtures for the CLI tests
+  differential/       # Rust-vs-C differential harness (pinned C commit)
+bench/                # Rust-vs-C timing scripts
 ```
 
 ## License
