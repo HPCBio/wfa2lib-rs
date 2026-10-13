@@ -298,8 +298,13 @@ impl WavefrontPenalties {
     /// Compute SW-score equivalent using Eizenga's formula.
     /// sw_score = (swg_match * (plen + tlen) - wf_score) / 2
     pub fn wf_score_to_sw_score(&self, plen: i32, tlen: i32, wf_score: i32) -> i32 {
+        // Wrapping, like C's int arithmetic in `WF_SCORE_TO_SW_SCORE`: C's driver
+        // also evaluates this at an unset end position (see `align_benchmark`).
         let swg_match = -self.match_;
-        (swg_match * (plen + tlen) - wf_score) / 2
+        swg_match
+            .wrapping_mul(plen.wrapping_add(tlen))
+            .wrapping_sub(wf_score)
+            / 2
     }
 }
 

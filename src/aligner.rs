@@ -8,7 +8,7 @@ use crate::compute;
 use crate::compute::{affine, affine2p, edit, linear};
 use crate::extend;
 use crate::heuristic::{self, HeuristicState, HeuristicStrategy};
-use crate::offset::{OFFSET_NULL, wavefront_h, wavefront_v};
+use crate::offset::{DPMATRIX_DIAGONAL_NULL, OFFSET_NULL, WfOffset, wavefront_h, wavefront_v};
 use crate::penalties::{DistanceMetric, WavefrontPenalties};
 use crate::sequences::{SequenceMode, WavefrontSequences};
 use crate::components::WF_PTR_NONE;
@@ -284,54 +284,28 @@ impl<const N: usize> WavefrontAligner<N> {
         if self.status == AlignStatus::EndReached {
             // Backtrace to produce CIGAR if requested
             if self.alignment_scope == AlignmentScope::ComputeAlignment {
-                let pos = self.alignment_end_pos;
-                match self.penalties.distance_metric {
-                    DistanceMetric::GapAffine => {
-                        backtrace::backtrace_affine(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            ComponentType::M,
-                            ComponentType::M,
-                            &mut self.cigar,
-                        );
-                    }
-                    DistanceMetric::GapAffine2p => {
-                        backtrace::backtrace_affine2p(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            ComponentType::M,
-                            ComponentType::M,
-                            &mut self.cigar,
-                        );
-                    }
-                    _ => {
-                        backtrace::backtrace_linear(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            &mut self.cigar,
-                        );
-                    }
-                }
+                self.backtrace_from(
+                    score,
+                    self.alignment_end_pos.k,
+                    self.alignment_end_pos.offset,
+                );
             }
             self.status = AlignStatus::Completed;
+        } else if self.status == AlignStatus::EndUnreachable
+            && self.alignment_end_pos.offset != OFFSET_NULL
+        {
+            // Z-dropped: partial alignment up to the best cell, max-trimmed
+            // (C's `wavefront_unialign_terminate`, which backtraces with the
+            // current score).
+            if self.alignment_scope == AlignmentScope::ComputeAlignment {
+                self.backtrace_from(
+                    score,
+                    self.alignment_end_pos.k,
+                    self.alignment_end_pos.offset,
+                );
+                self.maxtrim_cigar();
+            }
+            self.status = AlignStatus::Partial;
         }
 
         score
@@ -409,54 +383,14 @@ impl<const N: usize> WavefrontAligner<N> {
 
             // Backtrace to produce CIGAR if requested
             if self.alignment_scope == AlignmentScope::ComputeAlignment
-                && self.status == AlignStatus::EndReached
+                && (self.status == AlignStatus::EndReached
+                    || self.alignment_end_pos.offset != OFFSET_NULL)
             {
-                let pos = self.alignment_end_pos;
-                match self.penalties.distance_metric {
-                    DistanceMetric::GapAffine => {
-                        backtrace::backtrace_affine(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            ComponentType::M,
-                            ComponentType::M,
-                            &mut self.cigar,
-                        );
-                    }
-                    DistanceMetric::GapAffine2p => {
-                        backtrace::backtrace_affine2p(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            ComponentType::M,
-                            ComponentType::M,
-                            &mut self.cigar,
-                        );
-                    }
-                    _ => {
-                        backtrace::backtrace_linear(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            &mut self.cigar,
-                        );
-                    }
-                }
+                self.backtrace_from(
+                    score,
+                    self.alignment_end_pos.k,
+                    self.alignment_end_pos.offset,
+                );
 
                 // Post-processing: extension mode or unreachable → maxtrim
                 if self.extension || unreachable {
@@ -500,7 +434,7 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Resize CIGAR buffer if computing alignment
         if self.alignment_scope == AlignmentScope::ComputeAlignment {
-            let max_ops = (plen + tlen + 1) as usize;
+            let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
             self.cigar.resize(max_ops);
         }
 
@@ -544,7 +478,13 @@ impl<const N: usize> WavefrontAligner<N> {
         // Reset state
         self.num_null_steps = 0;
         self.status = AlignStatus::Ok;
-        self.alignment_end_pos = WavefrontPos::default();
+        // No end position until the end is reached or a Z-drop sets one
+        // (initialized as in C's `wavefront_aligner_init`).
+        self.alignment_end_pos = WavefrontPos {
+            score: -1,
+            k: DPMATRIX_DIAGONAL_NULL,
+            offset: OFFSET_NULL,
+        };
         self.heuristic_state.reset(&self.heuristic);
 
         // Compute allocation limits based on sequence lengths.
@@ -691,6 +631,51 @@ impl<const N: usize> WavefrontAligner<N> {
         false
     }
 
+    /// Backtrace the CIGAR from M-wavefront cell (`k`, `offset`), starting at
+    /// `score` (C's `wavefront_unialign_terminate`).
+    fn backtrace_from(&mut self, score: i32, k: i32, offset: WfOffset) {
+        let (plen, tlen) = (self.sequences.pattern_length, self.sequences.text_length);
+        match self.penalties.distance_metric {
+            DistanceMetric::GapAffine => backtrace::backtrace_affine(
+                &self.wf_components,
+                &self.wavefront_slab,
+                &self.penalties,
+                plen,
+                tlen,
+                score,
+                k,
+                offset,
+                ComponentType::M,
+                ComponentType::M,
+                &mut self.cigar,
+            ),
+            DistanceMetric::GapAffine2p => backtrace::backtrace_affine2p(
+                &self.wf_components,
+                &self.wavefront_slab,
+                &self.penalties,
+                plen,
+                tlen,
+                score,
+                k,
+                offset,
+                ComponentType::M,
+                ComponentType::M,
+                &mut self.cigar,
+            ),
+            _ => backtrace::backtrace_linear(
+                &self.wf_components,
+                &self.wavefront_slab,
+                &self.penalties,
+                plen,
+                tlen,
+                score,
+                k,
+                offset,
+                &mut self.cigar,
+            ),
+        }
+    }
+
     /// Apply maxtrim to the CIGAR based on the distance metric.
     /// Returns true if the CIGAR was trimmed.
     fn maxtrim_cigar(&mut self) -> bool {
@@ -731,10 +716,19 @@ impl<const N: usize> WavefrontAligner<N> {
             distances_base_k,
             plen,
             tlen,
+            self.penalties.match_,
             score,
         );
 
         if zdropped {
+            // C's `wavefront_heuristic_zdrop`: the alignment ends at the best
+            // cell seen; it is backtraced as a partial alignment.
+            let st = &self.heuristic_state;
+            self.alignment_end_pos = WavefrontPos {
+                score: st.max_wf_score,
+                k: st.max_sw_score_k,
+                offset: st.max_sw_score_offset,
+            };
             return true;
         }
 
@@ -1479,7 +1473,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let plen = pattern.len() as i32;
         let tlen = text.len() as i32;
 
-        let max_ops = (plen + tlen + 1) as usize;
+        let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
         self.cigar.resize(max_ops);
         self.status = AlignStatus::Ok;
 
@@ -1993,7 +1987,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let tlen = self.sequences.text_length;
 
         if self.alignment_scope == AlignmentScope::ComputeAlignment {
-            let max_ops = (plen + tlen + 1) as usize;
+            let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
             self.cigar.resize(max_ops);
         }
 
