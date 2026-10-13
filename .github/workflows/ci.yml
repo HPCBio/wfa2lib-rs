@@ -17,6 +17,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +48,8 @@ jobs:
   differential:
     name: Differential vs C (${{ matrix.suites }})
     runs-on: ubuntu-latest
+    # Each case also has its own timeout (run.sh TIMEOUT, 300 s).
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
