@@ -15,7 +15,8 @@ COMBINE-lab.
 | 2 | `init_ends_{lower,higher}` negative length wraps to a huge slice | 4d99296 | Fixed: `e494181` (fork PR #11, merged); upstream COMBINE-lab #6 (open) |
 | 3 | Edit/indel/linear kernels overrun the wavefront allocation | original port | Fixed: `06c593c` (fork PR #12, merged `12ba05b`) |
 | 4 | Unreachable banded alignments never terminate; affine banded output differs from C | 2c112b2, 35bfcde + original port | Fixed: `320611d`, `ddae4d8`, `29a9c89` (fork PR #14, merged `59db5a4`) |
-| 5 | CLI prints `0` and an empty CIGAR field when no alignment is found (C: `-1  -`) | original port (CLI) | Fix on branch `fix/cli-empty-cigar-output` |
+| 5 | CLI prints `0` and an empty CIGAR field when no alignment is found (C: `-1  -`) | original port (CLI) | Fixed: `5e6ce55` (fork PR #15, merged) |
+| 6 | Ends-free begin gaps ignored (output equals global) | original port | Fix on branch `feat/endsfree-begin-gaps` |
 
 All four were found by differential testing against C (fork issue #10): the
 Rust and C `align_benchmark` binaries run over the same configuration matrix,
@@ -126,9 +127,43 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   and printed its RLE string (empty).
 - **C:** `benchmark_print_output` uses score `-1` when the CIGAR is empty
   (`begin_offset >= end_offset`) and prints `-` for an empty CIGAR.
-- **Fix (branch `fix/cli-empty-cigar-output`):** the same rule in
+- **Fix (`5e6ce55`, fork PR #15, merged):** the same rule in
   `compute_output_score` and the CIGAR column. Banded-static output is now
   byte-identical to C `16969b5b` in high, med and score-only modes (30/30
   cells).
 - **Tests:** `tests/cli_output.rs` runs the binary: an empty CIGAR prints
   `-1  -`, and the completed and score-only formats are unchanged.
+
+## 6. Ends-free begin gaps ignored
+
+- **Symptom:** with `set_alignment_free_ends(P0, Pf, T0, Tf)` and P0 or T0 > 0,
+  the result was identical to the global alignment. Visible once the CLI
+  honoured `--wfa-span` (fork PR #16): every begin-gap cell differed from C,
+  for every metric.
+- **Root cause:** `pattern_begin_free` / `text_begin_free` were stored but
+  never read. C has two mechanisms, and neither was ported:
+  - `match == 0`: `wavefront_aligner_init_wf_m` seeds M0 over `[-P0, T0]`,
+    putting cell (h,0) on k = h and (0,v) on k = -v.
+  - `match != 0`: `wavefront_compute_endsfree_{required,limits,init,allocate_null}`
+    add cell (d,0) / (0,d) at score d * -match, before the ends are trimmed.
+- **Fix (branch `feat/endsfree-begin-gaps`):** `28cb857` (match == 0) and
+  `6a06d8f` (match != 0). Also C's extension preset (P0 = T0 = 0) and C #126's
+  restriction of the seeding to the ends-free span.
+- **Parity details reproduced:**
+  - C sets only `lo/hi` on M0; the initialized range stays `[0, 0]`.
+  - C's edit step nulls the boundary cells directly instead of calling
+    `init_ends`.
+  - Together these mean the edit/indel backtrace can't step onto M0's
+    begin-free diagonals. It falls back to `min(v,h)` unchecked `M`s, so
+    **C can emit an invalid CIGAR for edit/indel with begin gaps** (its own
+    `--check=correct` flags it; e.g. `ACGTTCGTACGA` vs `CCACGTACGTACGA`,
+    T0 = 3 → `2I12M`).
+  - Scores are correct. Gap metrics are unaffected, because their
+    `init_ends` widens the initialized range.
+  - Rust reproduces this for output identity. **To be reported upstream to C.**
+- **Result:** ends-free (begin and/or end gaps) and extension are
+  byte-identical to C for all metrics, match == 0 and match < 0, in
+  alignment, score-only and med modes.
+- **Tests:** `test_endsfree_begin_free_match_zero`,
+  `test_extension_ignores_begin_free`, and
+  `tests/cli_output.rs::ends_free_begin_gaps_match_c`.

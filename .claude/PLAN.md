@@ -246,7 +246,7 @@ banded path crashes.
    - [ ] document the `./WFA2-lib` checkout needed by the integration tests
 6. [ ] #5 X-drop / Z-drop in end-to-end mode
 7. [ ] #6 BiWFA heuristics; banded-adaptive as in C; port C #125
-8. [ ] #9 Ends-free begin-free gaps (library stores but never reads `*_begin_free`): `match == 0` initial M seeding over `[-P0, T0]` and the `match != 0` path (`wavefront_compute_endsfree_*`); port C #126
+8. [x] #9 Ends-free begin-free gaps: `match == 0` initial M seeding over `[-P0, T0]` (`28cb857`) and the `match != 0` path, `wavefront_compute_endsfree_*` (`6a06d8f`); C #126 semantics
 9. [ ] #7 BiWFA tie-breaking with match < 0
 
 **Per-change validation:**
