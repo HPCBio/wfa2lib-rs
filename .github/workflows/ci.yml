@@ -19,14 +19,23 @@ env:
   RUSTFLAGS: ""
 
 jobs:
+  # `cpu: x86-64-v3` builds Rust with AVX2 enabled at compile time, so the
+  # `cfg(target_feature = "avx2")` paths (as in `target-cpu=native` builds)
+  # are tested too; every hosted x86 runner supports v3, so the cache stays
+  # valid. `default` selects the AVX2 kernels at run time.
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.os }}${{ matrix.cpu != 'default' && format(', {0}', matrix.cpu) || '' }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      RUSTFLAGS: ${{ matrix.cpu != 'default' && format('-C target-cpu={0}', matrix.cpu) || '' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        cpu: [default]
+        include:
+          - { os: ubuntu-latest, cpu: x86-64-v3 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,17 +60,26 @@ jobs:
   # Suites run as parallel jobs; span is the longest (~15 min on Linux).
   # Linux runs Rust's x86 AVX2 kernels, macOS (arm64) its NEON ones, so
   # together they check that Rust gives the same output on both. macOS
-  # runners have 3 cores and 7 GB, so run.sh uses 1 job there.
+  # runners have 3 cores and 7 GB, so run.sh uses 1 job there. Linux also
+  # runs every suite with the x86-64-v3 build (see `test`).
   differential:
-    name: Differential vs C (${{ matrix.os }}, ${{ matrix.suites }})
+    name: Differential vs C (${{ matrix.os }}${{ matrix.cpu != 'default' && format(', {0}', matrix.cpu) || '' }}, ${{ matrix.suites }})
     runs-on: ${{ matrix.os }}
     # Each case also has its own timeout (run.sh TIMEOUT, 300 s).
     timeout-minutes: 90
+    env:
+      RUSTFLAGS: ${{ matrix.cpu != 'default' && format('-C target-cpu={0}', matrix.cpu) || '' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        cpu: [default]
         suites: [core, span, drops, banded adaptive biwfa]
+        include:
+          - { os: ubuntu-latest, cpu: x86-64-v3, suites: core }
+          - { os: ubuntu-latest, cpu: x86-64-v3, suites: span }
+          - { os: ubuntu-latest, cpu: x86-64-v3, suites: drops }
+          - { os: ubuntu-latest, cpu: x86-64-v3, suites: banded adaptive biwfa }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -79,6 +97,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: differential-${{ strategy.job-index }}
+          name: differential-${{ matrix.os }}-${{ matrix.cpu }}-${{ strategy.job-index }}
           path: target/differential/results.tsv
           if-no-files-found: ignore

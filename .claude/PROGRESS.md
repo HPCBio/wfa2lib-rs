@@ -121,6 +121,9 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - **2026-10-13:** CI (HPCBio/wfa2lib-rs#29): GitHub Actions runs clippy,
   the tests, a library-only build, `wfa_utest.sh` and the differential
   harness on Linux (x86-64) and macOS (arm64), on every PR and push to
-  `main`, so Rust is checked to be deterministic across platforms. Its
+  `main`, so Rust is checked to be deterministic across platforms; Linux
+  also runs with `target-cpu=x86-64-v3` (AVX2 enabled at compile time). CI
+  overrides `.cargo/config.toml`'s `target-cpu=native`, since cached builds
+  from one runner's CPU can crash on another. Its
   first run on x86 found HPCBio/wfa2lib-rs#34 (C's AVX2 ends-free kernel)
   and x86-only clippy errors.
