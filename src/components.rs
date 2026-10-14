@@ -226,8 +226,10 @@ impl<const N: usize> WavefrontComponents<N> {
     /// C's `wavefront_components_compact_bt_buffer`: keep only the
     /// backtrace blocks reachable from live cells of the wavefronts still in
     /// scope (scores `score - max_score_scope + 1 ..= score`), compacting
-    /// the buffer and translating the cells' block indices.
-    pub fn compact_bt_buffer(&mut self, score: usize) {
+    /// the buffer and translating the cells' block indices. `pinned` is an
+    /// extra chain to keep (a corrected-mode ends-free end candidate, or
+    /// `BT_BLOCK_IDX_NULL`); it is translated too.
+    pub fn compact_bt_buffer(&mut self, score: usize, pinned: &mut BtBlockIdx) {
         let Some(buf) = self.bt_buffer.as_mut() else {
             return;
         };
@@ -249,6 +251,7 @@ impl<const N: usize> WavefrontComponents<N> {
                 }
             }
         }
+        buf.mark_chain(*pinned, &mut bitmap);
         bitmap.update_counters();
         let total = buf.compact_marked(&bitmap);
         // Translate the live cells' indices (C assumes they point past the
@@ -264,6 +267,9 @@ impl<const N: usize> WavefrontComponents<N> {
                     }
                 }
             }
+        }
+        if *pinned != BT_BLOCK_IDX_NULL && *pinned >= compacted {
+            *pinned = compacted + bitmap.erank(*pinned) as BtBlockIdx;
         }
         buf.num_compacted_blocks = total;
     }

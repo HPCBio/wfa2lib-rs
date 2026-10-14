@@ -59,7 +59,7 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 
 - HPCBio/wfa2lib-rs#18: edit/indel ends-free with begin gaps can return an invalid CIGAR
   (C regression from `380eb31b`; reported as smarco/WFA2-lib#142 with a
-  proposed fix).
+  proposed fix). **Fixed in corrected mode** (`Compat::Corrected`; FIXED_BUGS 14b).
 - HPCBio/wfa2lib-rs#21: X-drop with `steps_between_cutoffs > 1` returns invalid
   CIGARs (C high-memory backtrace over pruned diagonals; C's `med` is valid).
 - HPCBio/wfa2lib-rs#22: Z-drop results differ between C's high-memory and `med`
@@ -79,10 +79,15 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   `align_benchmark`'s printed score differs only because it rescores the
   CIGAR globally, charging free end gaps. Rust follows the scalar order on
   every CPU; the harness builds C without `-march=native`.
-- smarco/WFA2-lib#102: ends-free with match < 0 can be suboptimal, depending on argument
-  order. This showed up in HPCBio/dada2-rs#51. Note that dada2-rs's
-  "free leading end-gap not credited" failure mode was the Rust HPCBio/wfa2lib-rs#9 bug,
-  fixed by HPCBio/wfa2lib-rs#17.
+- smarco/WFA2-lib#102, HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38: ends-free
+  with match < 0 can be suboptimal (trailing-end miss, repeat-unit shift,
+  all-gap alignment with whole-length free ends). This showed up in
+  HPCBio/dada2-rs#51. Note that dada2-rs's "free leading end-gap not
+  credited" failure mode was the Rust HPCBio/wfa2lib-rs#9 bug, fixed by
+  HPCBio/wfa2lib-rs#17; honoring begin gaps as C does then exposed #38.
+  **Fixed in corrected mode** (`Compat::Corrected`, `--no-c-compat`;
+  HPCBio/wfa2lib-rs#32), optimal against a DP oracle (FIXED_BUGS 14a). The
+  default stays C-identical.
 
 ### Upstream contributions
 
@@ -135,3 +140,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - **2026-10-14:** two Rust bugs found by a DP-oracle sweep: the `med`/`low`
   begin-free seed backtrace (match == 0, invalid CIGAR; FIXED_BUGS 12) and
   the affine2p modular-slot leak, which could segfault (FIXED_BUGS 13).
+- **2026-10-14:** HPCBio/wfa2lib-rs#32 per-aligner `Compat` setting
+  (default `C`; `Corrected` fixes known C bugs, CLI `--no-c-compat`). Covers
+  ends-free with match < 0 (HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38,
+  smarco/WFA2-lib#102), now optimal, and edit/indel begin-gap CIGARs
+  (HPCBio/wfa2lib-rs#18). Checked against a DP oracle.

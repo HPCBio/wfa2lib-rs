@@ -156,6 +156,13 @@ as each pair is aligned. Like the C tool, it also supports `--wfa-span`
 `--wfa-heuristic-parameters` (`banded-static`, `banded-adaptive`,
 `wfa-adaptive`, `xdrop`, `zdrop`).
 
+By default output is identical to C, including results C gets wrong. With
+`--no-c-compat` (library: `set_compat(Compat::Corrected)`), known C bugs are
+fixed instead. Currently this covers ends-free alignment with a match reward
+(`match < 0`), where C can return a suboptimal alignment (corrected mode
+returns the optimal one), and edit/indel ends-free with begin gaps, where C
+can return an invalid CIGAR. See `Compat` in the API docs.
+
 ## Project structure
 
 ```

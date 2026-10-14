@@ -373,3 +373,54 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
 - **Fix:** free the slot's old I2/D2 before storing NULL (as
   `reuse_or_allocate` does for stored wavefronts).
 - **Test:** `aligner::tests::test_affine2p_modular_slots_release_i2_d2`.
+
+## 14. Corrected mode (`Compat`, HPCBio/wfa2lib-rs#32)
+
+`Compat::Corrected` (CLI `--no-c-compat`) is a per-aligner opt-in that fixes
+known C bugs; the default `Compat::C` stays output-identical to C. It covers:
+
+### 14a. Ends-free with match < 0 (HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38, smarco/WFA2-lib#102)
+
+- **Symptom (C and C-compatible Rust):** with a match reward, ends-free
+  alignment can return a suboptimal result: a trailing-end miss of a point
+  or two (smarco/WFA2-lib#102), a shift by one repeat unit (#37), or, with
+  free ends spanning whole sequences, the all-gap alignment (#38).
+- **Root cause:** with `match < 0`, WFA scores an alignment as
+  `2 * penalty + M * (aligned bases)` (M = -match). For global alignment
+  `aligned bases = |P| + |T|` is fixed, so this ranks alignments correctly.
+  For ends-free it isn't fixed. C already charges begin-free gaps M per base
+  (the begin-free cell (0, d) or (d, 0) is seeded at score `d * M`). But it
+  ends at the first cell to reach a free end, charging nothing for the
+  trailing bases left over. An alignment that skips more trailing bases
+  scores too low, and the first one found wins.
+- **Fix (opt-in, `Compat::Corrected`, `--no-c-compat`):** a cell reaching
+  a free end at score `s` with `left` bases to skip is a complete alignment
+  of total `s + M * left`, which is `2 * penalty + M * (|P| + |T|)` for
+  every alignment. The extend step extends all diagonals, keeps the best
+  candidate (fewest left, then lowest k), and stops once the score reaches
+  its total. No later cell can do better. The backtrace starts from the
+  candidate's own score. Med/low keep its packed-CIGAR chain through buffer
+  compaction (it is marked and translated as a pinned chain). The returned
+  score is the total, so `wf_score_to_sw_score(|P|, |T|, score)` is the
+  real score. With match == 0 the output is unchanged (the totals equal the
+  scores).
+- **Cost:** it runs on until the optimal total, not just the first boundary
+  hit. Measured in `PERFORMANCE_LOG.md`.
+- **Tests:** `tests/corrected_endsfree.rs`: the #37/#38 reproducers, and
+  3000 random cases (linear/affine/affine2p, small alphabets and repeats,
+  whole-length, extension-like and random free ends). Each is checked
+  against a Gotoh DP oracle for score-only and for the CIGAR in
+  high/med/low. Also: match == 0 identical to C mode; a pending candidate
+  survives forced compaction in med/low; #38's pair B (16S, 1.4 kb).
+  240k further random cases (up to 40 bp) passed during development.
+
+### 14b. Edit/indel ends-free with begin gaps: invalid CIGAR (HPCBio/wfa2lib-rs#18)
+
+- **C bug:** a regression from `380eb31b` (reported as smarco/WFA2-lib#142).
+  For match == 0, M0's begin-free seeds get `lo/hi` but the initialized range
+  stays `[0, 0]`, and edit/indel never widen it. So the backtrace can't step
+  onto the seeds and emits unchecked `M`s.
+- **Fix (corrected mode):** set M0's initialized range to `[-P0, T0]`, the
+  fix proposed upstream. Gap metrics are unaffected (identical in both modes).
+- **Tests:** `issue_18_edit_begin_gaps`, `edit_indel_random_against_oracle`
+  (3000 cases vs the DP oracle, all memory modes).

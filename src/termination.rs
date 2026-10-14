@@ -58,6 +58,33 @@ pub fn termination_endsfree(
     false
 }
 
+/// The number of trailing bases left unaligned (free end gap) if cell
+/// (`k`, `offset`) is a valid ends-free termination point, else `None`.
+/// When both sequences are consumed this is 0.
+#[inline(always)]
+pub fn endsfree_left(
+    pattern_length: i32,
+    text_length: i32,
+    pattern_end_free: i32,
+    text_end_free: i32,
+    k: i32,
+    offset: WfOffset,
+) -> Option<i32> {
+    let h = wavefront_h(k, offset);
+    let v = wavefront_v(k, offset);
+
+    // Text consumed: the rest of the pattern is a free end gap
+    let pattern_left = pattern_length - v;
+    let text_left = text_length - h;
+    let by_text = (h >= text_length && pattern_left <= pattern_end_free).then_some(pattern_left);
+    // Pattern consumed: the rest of the text is a free end gap
+    let by_pattern = (v >= pattern_length && text_left <= text_end_free).then_some(text_left);
+    match (by_text, by_pattern) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

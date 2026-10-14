@@ -464,6 +464,51 @@ pub fn extend_matches_packed_endsfree(
     None
 }
 
+/// Extend matches on every diagonal for ends-free alignment and return the
+/// best termination point: the cell with the fewest bases left unaligned
+/// (lowest k on ties), as `(k, offset, left)`. Unlike
+/// [`extend_matches_packed_endsfree`], doesn't stop at the first one, so the
+/// wavefront stays complete for later scores (corrected mode,
+/// [`crate::aligner::Compat::Corrected`]).
+#[inline]
+pub fn extend_matches_packed_endsfree_best(
+    sequences: &WavefrontSequences,
+    wf: &mut Wavefront,
+    pattern_end_free: i32,
+    text_end_free: i32,
+) -> Option<(i32, WfOffset, i32)> {
+    let ptrs = sequences.ptrs();
+    let pattern_length = sequences.pattern_length;
+    let text_length = sequences.text_length;
+    let mut best: Option<(i32, WfOffset, i32)> = None;
+
+    // SAFETY: Same as extend_matches_packed_end2end.
+    unsafe {
+        let centered = wf.offsets_centered_mut_ptr();
+        for k in wf.lo..=wf.hi {
+            let off_ptr = centered.offset(k as isize);
+            if *off_ptr == OFFSET_NULL {
+                continue;
+            }
+            let offset = extend_scalar_one(ptrs.pattern, ptrs.text, k, *off_ptr);
+            *off_ptr = offset;
+            if let Some(left) = termination::endsfree_left(
+                pattern_length,
+                text_length,
+                pattern_end_free,
+                text_end_free,
+                k,
+                offset,
+            ) && best.is_none_or(|(_, _, l)| left < l)
+            {
+                best = Some((k, offset, left));
+            }
+        }
+    }
+
+    best
+}
+
 // --- Custom extend functions for Lambda mode (bounds-checked, no sentinels) ---
 
 /// Extend matches for Lambda mode end-to-end alignment (bounds-checked).
@@ -575,6 +620,49 @@ pub fn extend_matches_custom_endsfree(
     None
 }
 
+/// Lambda-mode [`extend_matches_packed_endsfree_best`].
+#[inline]
+pub fn extend_matches_custom_endsfree_best(
+    sequences: &WavefrontSequences,
+    wf: &mut Wavefront,
+    pattern_end_free: i32,
+    text_end_free: i32,
+) -> Option<(i32, WfOffset, i32)> {
+    let pattern_length = sequences.pattern_length;
+    let text_length = sequences.text_length;
+    let centered = unsafe { wf.offsets_centered_mut_ptr() };
+    let mut best: Option<(i32, WfOffset, i32)> = None;
+
+    for k in wf.lo..=wf.hi {
+        let mut offset = unsafe { *centered.offset(k as isize) };
+        if offset == OFFSET_NULL {
+            continue;
+        }
+
+        while sequences.cmp_lambda(offset - k, offset) {
+            offset += 1;
+        }
+
+        unsafe {
+            *centered.offset(k as isize) = offset;
+        }
+
+        if let Some(left) = termination::endsfree_left(
+            pattern_length,
+            text_length,
+            pattern_end_free,
+            text_end_free,
+            k,
+            offset,
+        ) && best.is_none_or(|(_, _, l)| left < l)
+        {
+            best = Some((k, offset, left));
+        }
+    }
+
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +757,41 @@ mod tests {
         let (k, offset) = result.unwrap();
         assert_eq!(k, 0);
         assert_eq!(offset, 4);
+    }
+
+    #[test]
+    fn test_endsfree_best_fewest_left() {
+        // pattern="AAAA", text="AAAAAA": diagonals 0, 1, 2 all consume the
+        // pattern, leaving 2, 1 and 0 text bases. The first-hit kernel stops
+        // at k=0; the best kernel extends all and picks k=2.
+        let check = |seq: &WavefrontSequences, lambda: bool| {
+            let mut wf = Wavefront::allocate(11, false);
+            wf.init(-5, 5);
+            wf.set_limits(0, 2);
+            for k in 0..=2 {
+                wf.set_offset(k, k);
+            }
+            let best = if lambda {
+                extend_matches_custom_endsfree_best(seq, &mut wf, 0, 6)
+            } else {
+                extend_matches_packed_endsfree_best(seq, &mut wf, 0, 6)
+            };
+            assert_eq!(best, Some((2, 6, 0)));
+            assert_eq!((wf.get_offset(0), wf.get_offset(1)), (4, 5));
+        };
+        let mut seq = WavefrontSequences::new();
+        seq.init_ascii(b"AAAA", b"AAAAAA", false);
+        let mut wf = Wavefront::allocate(11, false);
+        wf.init(-5, 5);
+        wf.set_limits(0, 2);
+        for k in 0..=2 {
+            wf.set_offset(k, k);
+        }
+        assert_eq!(extend_matches_packed_endsfree(&seq, &mut wf, 0, 6), Some((0, 4)));
+        check(&seq, false);
+        let mut seq = WavefrontSequences::new();
+        seq.init_lambda(Box::new(|_, _| true), 4, 6, false);
+        check(&seq, true);
     }
 
     #[test]

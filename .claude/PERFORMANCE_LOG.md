@@ -281,3 +281,31 @@ Notes:
 - Parity: differential harness with debug assertions on, 1242/1262
   identical or same-error, only the 20 known HPCBio/wfa2lib-rs#22 cases differ.
 
+
+## 2026-10-14: `Compat::Corrected` ends-free (HPCBio/wfa2lib-rs#32, #37, #38)
+
+Branch `fix/corrected-endsfree-match-reward` (with HPCBio/wfa2lib-rs#39) vs `main` `5cdcea3`, Apple
+Silicon (scalar kernels), `long.seq` (300 × 2 kb), best of 3 runs, CIGAR /
+score-only, ms. "C" is the default mode, "corr." is `--no-c-compat`.
+
+| Config | main | C | corr. | Max RSS |
+|---|---|---|---|---|
+| affine `-5,4,0,8`, ends-free 0.1 ×4 | 1042 / 704 | 1020 / 701 | 1391 / 1019 | 82 / 3 MB |
+| affine `-5,4,0,8`, ends-free 1 ×4 (whole length) | 1649 / 1214 | 1652 / 1225 | 2301 / 1795 | 138 / 4 MB |
+| affine `-5,4,0,8`, extension | 140 / 119 | 135 / 121 | 182 / 167 | 39 / 2 MB |
+| affine `0,4,6,2`, ends-free 0.1 ×4 | 239 / 223 | 239 / 225 | 236 / 231 | 17 / 2 MB |
+| affine2p `-1,6,2,4,12,1`, ends-free 0.1 ×4 | 1395 / 989 | 1392 / 970 | 1775 / 1323 | 123 / 5 MB |
+| affine `-5,4,0,8`, global | 118 / 105 | 119 / 107 | 116 / 106 | 39 / 2 MB |
+
+- C mode: no change from `main` (within noise). The affine2p slot-leak fix
+  (FIXED_BUGS 13) and the med/low seed fix (FIXED_BUGS 12, both in
+  HPCBio/wfa2lib-rs#39) don't show.
+- Corrected mode costs +27–47% on ends-free/extension with match < 0, and
+  nothing elsewhere (match == 0 and global take the C path). It runs on
+  past the first boundary hit until the score reaches the best candidate's
+  total, `s + M * left`. Memory is unchanged.
+- Possible later optimization (exact, not a heuristic): from cell (v, h)
+  at score s, any completion totals at least `s + M * |(|P| - v) - (|T| - h)|`.
+  Matches cost 0, and every base of the length difference is either a gap
+  (> M) or a free-end base (M). Once a candidate exists, diagonals whose
+  bound reaches its total can be trimmed, narrowing the wavefronts.
