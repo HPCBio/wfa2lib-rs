@@ -163,6 +163,7 @@ Max RSS (`/usr/bin/time -l`), 50,000 × 1 kb, same machine. "main" is
   allocated over the full historic diagonal range, whereas C allocates each at
   its `lo..hi` (plus margins). That likely explains most of the affine CIGAR
   gap (10.7 vs 4.3 MB) against PLAN's "memory within 1.5x" target.
+  Addressed by `perf/high-memory` (HPCBio/wfa2lib-rs#31; see below).
 
 
 ### 2026-10-13 — `feat/biwfa-heuristics-banded` vs `6031aa7` (main)
@@ -210,3 +211,73 @@ Same machine and data, Rust only, minimum of 3 runs (ms). Max RSS from
   at 40+ ns per cell on M2 from false store/load aliasing between
   identically aligned arrays. Per-component passes over slices
   (`compute/piggyback.rs`) vectorize: ~4 ns per cell.
+
+### 2026-10-13 — `perf/high-memory` vs `22d97e8` (main): C's wavefront allocation
+
+HPCBio/wfa2lib-rs#31. Same machine (M2 Pro), idle. Time is the minimum of 3
+interleaved runs; max RSS from `/usr/bin/time -l`.
+
+**Long pairs** (`wfa.utest.seq`, incl. 10 kb pairs; `long.seq`, 300 × 2 kb),
+wall time:
+
+| Configuration | main | branch | C | main RSS | branch RSS | C RSS |
+|---|---|---|---|---|---|---|
+| utest affine2p `-1,4,6,2,24,1`, ends-free `0.1,0,0.1,0` | 18.76 s | 3.43 s | 4.19 s | 4838 MB | 3665 MB | 3574 MB |
+| utest affine2p | 2.54 s | 1.67 s | 1.69 s | 3529 MB | 1789 MB | 1753 MB |
+| utest affine | 0.41 s | 0.35 s | 0.35 s | 927 MB | 275 MB | 272 MB |
+| utest edit | 0.04 s | 0.03 s | 0.03 s | 56 MB | 15 MB | 22 MB |
+| utest gap-linear | 0.05 s | 0.04 s | 0.04 s | 85 MB | 27 MB | 25 MB |
+| long affine | 0.12 s | 0.11 s | 0.11 s | 42 MB | 17 MB | 11 MB |
+| long affine2p | 0.60 s | 0.53 s | 0.53 s | 139 MB | 62 MB | 49 MB |
+
+**Standard benchmark** (50,000 × 1 kb, 5% error), ms:
+
+| Mode | main | branch | Δ | C |
+|---|---|---|---|---|
+| Edit score | 204 | 209 | +2.6% | 401 |
+| Edit CIGAR | 251 | 258 | +2.5% | 750 |
+| Linear score | 339 | 338 | −0.5% | 570 |
+| Linear CIGAR | 390 | 383 | −1.6% | 962 |
+| Affine score | 1948 | 1944 | −0.2% | 2300 |
+| Affine CIGAR | 2098 | 2079 | −0.9% | 2660 |
+| Affine `med` | 8475 | 8196 | −3.3% | 10540 |
+| BiWFA (ultralow) | 3327 | 3320 | −0.2% | 4180 |
+| Affine2p score | 7543 | 7663 | +1.6% | 8570 |
+| Affine2p CIGAR | 7892 | 8051 | +2.0% | 8930 |
+
+Max RSS on this set: affine CIGAR 10 → 6 MB (C 4), affine2p CIGAR 25 → 13 MB
+(C 9). Run-to-run noise (same binary twice) is about 1%.
+
+What changed (all as C):
+- **Allocation range.** Every wavefront was allocated over the full diagonal
+  range `[-(plen + scope + 2), tlen + scope + 2]` from score 0. C allocates
+  over a running range that starts at `[0, 0]` and grows with the wavefronts
+  (`lo - (scope + 1)` .. `hi + (scope + 1)`, merged), which still covers the
+  cells kernels read up to `max_score_scope` scores later. The computed
+  `lo`/`hi` and their clamps are unchanged.
+- **Slab mode.** C uses a "tight" slab when non-modular (CIGAR): wavefronts up
+  to the initial length (1000) are standard and reused across alignments;
+  larger ones get their exact length and are freed after the alignment. Rust
+  used "reuse" everywhere, sizing every wavefront at 1.5× the largest seen
+  (47,141 wavefronts × 24,880 cells on utest affine2p). Oversize wavefronts
+  now come from their own arena, reset after the alignment; standard ones
+  stay on the free list.
+- **Slab safety.** New wavefronts reuse deallocated slots, so the slab Vec
+  can't outgrow its reserved capacity (a reallocation would invalidate the
+  pointers components hold); `debug_assert`ed, as are cell accesses outside
+  a wavefront's allocation. The arena's slow path now looks for an existing
+  chunk that fits instead of appending (it had reached 80,763 chunks).
+
+Notes:
+- First version: CIGAR modes on 1 kb were 4–6% slower. Resetting the whole
+  slab after any alignment with an oversize wavefront (on 1 kb affine2p,
+  the cheap second gap makes some wavefronts wider than 1000) rebuilt every
+  wavefront; the separate oversize arena fixed it (affine2p CIGAR +5.5% →
+  +2.0%). A per-alignment scan for non-standard lengths cost ~1%; a flag
+  replaced it.
+- The remaining ±2–3% on short pairs isn't in any one function (profiles
+  match main); padding the allocation range shifted affine2p by ~1%, so it's
+  likely data placement. Not pursued.
+- Parity: differential harness with debug assertions on, 1242/1262
+  identical or same-error, only the 20 known HPCBio/wfa2lib-rs#22 cases differ.
+

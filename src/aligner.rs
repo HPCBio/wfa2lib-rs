@@ -324,7 +324,8 @@ impl<const N: usize> WavefrontAligner<N> {
             false,
             false,
         );
-        let init_wf_length = 10;
+        // C's `wavefront_slab_new(1000, ...)`.
+        let init_wf_length = 1000;
 
         Self {
             sequences: WavefrontSequences::new(),
@@ -416,7 +417,7 @@ impl<const N: usize> WavefrontAligner<N> {
             piggyback,
             piggyback,
         );
-        let mut slab = WavefrontSlab::new(10, piggyback, SlabMode::Reuse);
+        let mut slab = WavefrontSlab::new(1000, piggyback, SlabMode::Reuse);
         if N == 5 {
             slab.set_cache_coloring(24);
         }
@@ -707,9 +708,11 @@ impl<const N: usize> WavefrontAligner<N> {
         // Resize components for sequence dimensions
         self.wf_components.resize(plen, tlen, &self.penalties);
 
-        // CIGAR (non-modular): reap wavefronts to free list without arena reset —
-        // offset arrays are reused in-place next alignment (zero-alloc steady state).
+        // As C: modular (score-only) wavefronts all have the slab's current
+        // length and are reused; non-modular ones are sized to their own
+        // range ("tight"), so memory follows the wavefronts' actual spread.
         // Score-only (modular): full clear; circular window already handles reuse.
+        self.wavefront_slab.set_mode(if score_only { SlabMode::Reuse } else { SlabMode::Tight });
         if score_only {
             self.wavefront_slab.clear();
         } else {
@@ -754,18 +757,20 @@ impl<const N: usize> WavefrontAligner<N> {
         let eff_lo = -(plen + max_score_scope + 2);
         let eff_hi = tlen + max_score_scope + 2;
 
-        // Update historic bounds — these define the min base_k for all wavefronts
+        // Limits the computed lo/hi are clamped to.
         self.wf_components.historic_min_lo = eff_lo;
         self.wf_components.historic_max_hi = eff_hi;
 
-        // Ensure the slab allocates wavefronts large enough for the full range
-        self.wavefront_slab.ensure_min_length(eff_lo, eff_hi);
-
-        // Resize null/victim wavefronts
-        self.wf_components.resize_null_victim(eff_lo, eff_hi);
-
-        // Allocate initial M-wavefront at score 0
-        let wf_ptr = self.wavefront_slab.allocate_ptr(eff_lo, eff_hi);
+        // Allocate initial M-wavefront at score 0, over C's initial range
+        // (the begin-free diagonals with match == 0).
+        let (lo0, hi0) =
+            if self.penalties.match_ == 0 && self.alignment_span == AlignmentSpan::EndsFree {
+                (-self.pattern_begin_free, self.text_begin_free)
+            } else {
+                (0, 0)
+            };
+        let (alloc_lo, alloc_hi) = self.output_alloc_range(0, lo0, hi0);
+        let wf_ptr = self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi);
         unsafe {
             (*wf_ptr).set_offset(0, 0);
             (*wf_ptr).set_limits(0, 0);
@@ -1157,17 +1162,13 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         // Allocate or reuse output wavefront
-        let curr_ptr = if self.wf_components.memory_modular {
-            let old = self.wf_components.get_m_ptr(score_curr);
-            if !old.is_null() {
-                unsafe { (*old).init(hist_lo, hist_hi); (*old).status = WavefrontStatus::Busy; }
-                old
-            } else {
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-            }
+        let (alloc_lo, alloc_hi) = self.output_alloc_range(score, lo, hi);
+        let old = if self.wf_components.memory_modular {
+            self.wf_components.get_m_ptr(score_curr)
         } else {
-            self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
+            WF_PTR_NONE
         };
+        let curr_ptr = self.reuse_or_allocate(old, alloc_lo, alloc_hi);
         unsafe { (*curr_ptr).set_limits(lo, hi); }
 
         // Compute kernel
@@ -1272,8 +1273,8 @@ impl<const N: usize> WavefrontAligner<N> {
             return;
         }
 
-        // Ensure null/victim wavefronts cover the range
-        self.wf_components.resize_null_victim(lo, hi);
+        // Allocation range (also resizes the null/victim wavefronts)
+        let (alloc_lo, alloc_hi) = self.output_alloc_range(score, lo, hi);
 
         // Initialize input wavefront ends (like C's wavefront_compute_init_ends)
         // misms needs [lo, hi]
@@ -1292,17 +1293,12 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         // Allocate or reuse output wavefront
-        let curr_ptr = if self.wf_components.memory_modular {
-            let old = self.wf_components.get_m_ptr(score_curr);
-            if !old.is_null() {
-                unsafe { (*old).init(hist_lo, hist_hi); (*old).status = WavefrontStatus::Busy; }
-                old
-            } else {
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-            }
+        let old = if self.wf_components.memory_modular {
+            self.wf_components.get_m_ptr(score_curr)
         } else {
-            self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
+            WF_PTR_NONE
         };
+        let curr_ptr = self.reuse_or_allocate(old, alloc_lo, alloc_hi);
         unsafe { (*curr_ptr).set_limits(lo, hi); }
 
         // Compute kernel using raw pointers for multi-borrow
@@ -1436,8 +1432,8 @@ impl<const N: usize> WavefrontAligner<N> {
             return;
         }
 
-        // Ensure null/victim wavefronts cover the range
-        self.wf_components.resize_null_victim(lo, hi);
+        // Allocation range (also resizes the null/victim wavefronts)
+        let (alloc_lo, alloc_hi) = self.output_alloc_range(score, lo, hi);
 
         // Prefetch input wavefront offset arrays into L1 cache.
         #[cfg(target_arch = "x86_64")]
@@ -1471,12 +1467,7 @@ impl<const N: usize> WavefrontAligner<N> {
             macro_rules! reuse_or_alloc_slot {
                 ($comp:ident, $slot:expr) => {{
                     let old = self.wf_components.$comp($slot);
-                    if !old.is_null() {
-                        unsafe { (*old).init(hist_lo, hist_hi); (*old).status = WavefrontStatus::Busy; }
-                        old
-                    } else {
-                        self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-                    }
+                    self.reuse_or_allocate(old, alloc_lo, alloc_hi)
                 }}
             }
             (
@@ -1486,9 +1477,9 @@ impl<const N: usize> WavefrontAligner<N> {
             )
         } else {
             (
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
+                self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi),
+                self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi),
+                self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi),
             )
         };
 
@@ -1682,8 +1673,8 @@ impl<const N: usize> WavefrontAligner<N> {
             return;
         }
 
-        // Ensure null/victim wavefronts cover the range
-        self.wf_components.resize_null_victim(lo, hi);
+        // Allocation range (also resizes the null/victim wavefronts)
+        let (alloc_lo, alloc_hi) = self.output_alloc_range(score, lo, hi);
 
         // Prefetch input wavefront offset arrays into L1 cache.
         // These prefetches overlap with the init_ends work below, hiding L1 miss latency.
@@ -1723,12 +1714,7 @@ impl<const N: usize> WavefrontAligner<N> {
         macro_rules! reuse_or_alloc_slot {
             ($comp:ident, $slot:expr) => {{
                 let old = self.wf_components.$comp($slot);
-                if !old.is_null() {
-                    unsafe { (*old).init(hist_lo, hist_hi); (*old).status = WavefrontStatus::Busy; }
-                    old
-                } else {
-                    self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-                }
+                self.reuse_or_allocate(old, alloc_lo, alloc_hi)
             }}
         }
 
@@ -1743,9 +1729,9 @@ impl<const N: usize> WavefrontAligner<N> {
                 )
             } else {
                 (
-                    self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                    self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                    self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
+                    self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi),
+                    self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi),
+                    self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi),
                 )
             };
 
@@ -1753,7 +1739,7 @@ impl<const N: usize> WavefrontAligner<N> {
             let p = if self.wf_components.memory_modular {
                 reuse_or_alloc_slot!(get_i2_ptr_slot, out_slot)
             } else {
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
+                self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi)
             };
             (p, true)
         } else {
@@ -1764,7 +1750,7 @@ impl<const N: usize> WavefrontAligner<N> {
             let p = if self.wf_components.memory_modular {
                 reuse_or_alloc_slot!(get_d2_ptr_slot, out_slot)
             } else {
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
+                self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi)
             };
             (p, true)
         } else {
@@ -2531,7 +2517,9 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         self.wf_components.resize(plen, tlen, &self.penalties);
-        if self.wf_components.memory_modular {
+        let modular = self.wf_components.memory_modular;
+        self.wavefront_slab.set_mode(if modular { SlabMode::Reuse } else { SlabMode::Tight });
+        if modular {
             self.wavefront_slab.clear();
         } else {
             self.wavefront_slab.reap_cigar();
@@ -2564,11 +2552,10 @@ impl<const N: usize> WavefrontAligner<N> {
 
         self.wf_components.historic_min_lo = eff_lo;
         self.wf_components.historic_max_hi = eff_hi;
-        self.wavefront_slab.ensure_min_length(eff_lo, eff_hi);
-        self.wf_components.resize_null_victim(eff_lo, eff_hi);
 
         // Allocate initial wavefront at score 0
-        let wf_ptr = self.wavefront_slab.allocate_ptr(eff_lo, eff_hi);
+        let (alloc_lo, alloc_hi) = self.output_alloc_range(0, 0, 0);
+        let wf_ptr = self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi);
         unsafe {
             (*wf_ptr).set_offset(0, 0);
             (*wf_ptr).set_limits(0, 0);
@@ -2632,6 +2619,57 @@ impl<const N: usize> WavefrontAligner<N> {
             }
             _ => (lo, hi),
         }
+    }
+
+    /// C's `wavefront_compute_limits_output`, with the ends-free limits of
+    /// `wavefront_compute_allocate_output`: the diagonal range to allocate an
+    /// output wavefront for `lo..=hi` at `score` over. Pads by
+    /// `max_score_scope + 1` and merges into the alignment's running range,
+    /// so inputs read up to `max_score_scope` scores later stay covered.
+    /// Also resizes the null/victim wavefronts to it.
+    #[inline(always)]
+    fn output_alloc_range(&mut self, score: i32, lo: i32, hi: i32) -> (i32, i32) {
+        let (mut lo, mut hi) = (lo, hi);
+        if self.alignment_span == AlignmentSpan::EndsFree
+            && score >= 0
+            && let Some(k) = self.endsfree_begin_k(score)
+        {
+            lo = lo.min(-k);
+            hi = hi.max(k);
+        }
+        let pad = self.wf_components.max_score_scope as i32 + 1;
+        let c = &mut self.wf_components;
+        if lo - pad < c.alloc_min_lo || hi + pad > c.alloc_max_hi {
+            c.alloc_min_lo = c.alloc_min_lo.min(lo - pad);
+            c.alloc_max_hi = c.alloc_max_hi.max(hi + pad);
+            c.resize_null_victim(c.alloc_min_lo, c.alloc_max_hi);
+        }
+        (c.alloc_min_lo, c.alloc_max_hi)
+    }
+
+    /// An output wavefront over `alloc_lo..=alloc_hi`: `old` (the modular
+    /// slot's previous wavefront) re-initialized if it is large enough, else
+    /// a slab allocation (`old` is returned to the slab).
+    #[inline(always)]
+    fn reuse_or_allocate(
+        &mut self,
+        old: *mut crate::wavefront::Wavefront,
+        alloc_lo: i32,
+        alloc_hi: i32,
+    ) -> *mut crate::wavefront::Wavefront {
+        if !old.is_null() {
+            let fits = unsafe { (*old).wf_elements_allocated }
+                >= crate::offset::wavefront_length(alloc_lo, alloc_hi);
+            if fits {
+                unsafe {
+                    (*old).init(alloc_lo, alloc_hi);
+                    (*old).status = WavefrontStatus::Busy;
+                }
+                return old;
+            }
+            self.wavefront_slab.free_ptr(old);
+        }
+        self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi)
     }
 
     /// C's `wavefront_compute_endsfree_required`: with match < 0, the
@@ -2713,9 +2751,8 @@ impl<const N: usize> WavefrontAligner<N> {
             (false, true) => (-k, -k),
             (false, false) => (0, 0),
         };
-        let hist_lo = self.wf_components.historic_min_lo;
-        let hist_hi = self.wf_components.historic_max_hi;
-        let wf_ptr = self.wavefront_slab.allocate_ptr(hist_lo, hist_hi);
+        let (alloc_lo, alloc_hi) = self.output_alloc_range(-1, lo, hi);
+        let wf_ptr = self.wavefront_slab.allocate_ptr(alloc_lo, alloc_hi);
         let wf = unsafe { &mut *wf_ptr };
         for kk in lo..=hi {
             wf.set_null_cell(kk);

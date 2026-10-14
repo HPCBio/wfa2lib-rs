@@ -447,12 +447,14 @@ impl Wavefront {
     /// Get the offset at diagonal `k`.
     #[inline(always)]
     pub fn get_offset(&self, k: i32) -> WfOffset {
+        debug_assert!(self.is_allocated(k), "get_offset({k}) outside allocated range");
         unsafe { *self.centered_offsets.offset(k as isize) }
     }
 
     /// Set the offset at diagonal `k`.
     #[inline(always)]
     pub fn set_offset(&mut self, k: i32, value: WfOffset) {
+        debug_assert!(self.is_allocated(k), "set_offset({k}) outside allocated range");
         unsafe { *self.centered_offsets.offset(k as isize) = value; }
     }
 
@@ -471,6 +473,7 @@ impl Wavefront {
     #[inline(always)]
     pub fn get_bt_pcigar(&self, k: i32) -> Pcigar {
         debug_assert!(!self.bt_pcigar_ptr.is_null());
+        debug_assert!(self.is_allocated(k));
         unsafe { *self.bt_pcigar_ptr.add((k - self.base_k) as usize) }
     }
 
@@ -478,6 +481,7 @@ impl Wavefront {
     #[inline(always)]
     pub fn set_bt_pcigar(&mut self, k: i32, value: Pcigar) {
         debug_assert!(!self.bt_pcigar_ptr.is_null());
+        debug_assert!(self.is_allocated(k));
         unsafe { *self.bt_pcigar_ptr.add((k - self.base_k) as usize) = value; }
     }
 
@@ -485,6 +489,7 @@ impl Wavefront {
     #[inline(always)]
     pub fn get_bt_prev(&self, k: i32) -> BtBlockIdx {
         debug_assert!(!self.bt_prev_ptr.is_null());
+        debug_assert!(self.is_allocated(k));
         unsafe { *self.bt_prev_ptr.add((k - self.base_k) as usize) }
     }
 
@@ -492,6 +497,7 @@ impl Wavefront {
     #[inline(always)]
     pub fn set_bt_prev(&mut self, k: i32, value: BtBlockIdx) {
         debug_assert!(!self.bt_prev_ptr.is_null());
+        debug_assert!(self.is_allocated(k));
         unsafe { *self.bt_prev_ptr.add((k - self.base_k) as usize) = value; }
     }
 

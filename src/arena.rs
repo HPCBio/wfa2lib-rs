@@ -88,8 +88,9 @@ impl ByteArena {
     /// Slow path: current chunk is full, try next or allocate a new one.
     #[cold]
     fn alloc_slow(&mut self, size_aligned: usize) -> *mut u8 {
-        let next = self.current_chunk + 1;
-        if next < self.chunks.len() {
+        // Reuse the next existing chunk large enough (after a reset), so
+        // chunks don't pile up when a request outgrows the next one.
+        for next in self.current_chunk + 1..self.chunks.len() {
             let (chunk_ptr, chunk_cap) = self.chunks[next];
             if size_aligned <= chunk_cap {
                 self.current_chunk = next;

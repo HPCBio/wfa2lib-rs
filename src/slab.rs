@@ -51,10 +51,22 @@ pub struct WavefrontSlab {
     wavefronts: Vec<Wavefront>,
     /// Indices of free wavefronts (stack).
     free_list: Vec<WavefrontIdx>,
+    /// Indices of deallocated wavefronts, whose slots `allocate_new` reuses
+    /// so the Vec doesn't outgrow its reserved capacity (a reallocation
+    /// would invalidate the `*mut Wavefront` pointers held by components).
+    dealloc_list: Vec<WavefrontIdx>,
+    /// Whether some wavefront may have a non-standard length (Tight: other
+    /// than `init_wf_length`; Reuse: allocated before `current_wf_length`
+    /// last grew), so `reap_cigar` must start over.
+    mixed_lengths: bool,
     /// Total memory used in bytes.
     memory_used: u64,
     /// Arena for all per-wavefront arrays (offsets, bt_pcigar, bt_prev). No zeroing.
     arena: ByteArena,
+    /// Arena for Tight-mode wavefronts larger than `init_wf_length`. C frees
+    /// those after each alignment and repurposes the rest; resetting this
+    /// arena alone does the same.
+    oversize_arena: ByteArena,
 }
 
 impl WavefrontSlab {
@@ -72,8 +84,11 @@ impl WavefrontSlab {
             current_wf_length: init_wf_length,
             wavefronts: Vec::with_capacity(128),
             free_list: Vec::with_capacity(32),
+            dealloc_list: Vec::new(),
+            mixed_lengths: false,
             memory_used: 0,
             arena: ByteArena::new(arena_capacity),
+            oversize_arena: ByteArena::new(1 << 20),
         }
     }
 
@@ -85,6 +100,7 @@ impl WavefrontSlab {
     /// Enable cache coloring on the arena.
     pub fn set_cache_coloring(&mut self, n_colors: u32) {
         self.arena.set_cache_coloring(n_colors);
+        self.oversize_arena.set_cache_coloring(n_colors);
     }
 
     /// Get the slab mode.
@@ -112,6 +128,7 @@ impl WavefrontSlab {
                 if wf_length > self.current_wf_length {
                     let proposed = (wf_length as f32 * WF_SLAB_EXPAND_FACTOR) as i32;
                     self.current_wf_length = proposed;
+                    self.mixed_lengths = true;
                     self.reap_free();
                 }
                 // Try to reuse a free wavefront
@@ -179,6 +196,7 @@ impl WavefrontSlab {
         } else {
             self.memory_used -= self.wavefronts[idx].get_size();
             self.wavefronts[idx].status = WavefrontStatus::Deallocated;
+            self.dealloc_list.push(idx);
         }
     }
 
@@ -186,14 +204,43 @@ impl WavefrontSlab {
     ///
     /// Equivalent to C's `wavefront_slab_reap()`. Puts all live wavefronts on
     /// the free list WITHOUT resetting `current_wf_length` or the arena. Since
-    /// `current_wf_length` is preserved, the next call to `ensure_min_length`
-    /// skips `reap_free()` and `allocate()` directly pops from the free list —
-    /// near-zero allocation overhead in steady state (alignment 2+).
+    /// `current_wf_length` is preserved, `allocate()` pops wavefronts of that
+    /// length straight from the free list — near-zero allocation overhead in
+    /// steady state (alignment 2+).
     ///
     /// Use this instead of `clear()` for CIGAR (non-modular) mode.
     pub fn reap_cigar(&mut self) {
+        // C repurposes wavefronts of the standard length (Tight: the initial
+        // length; Reuse: the current one) and frees the rest. Tight-mode
+        // oversize wavefronts live in their own arena, so drop them and reset
+        // it. Otherwise (Reuse after growth) the arena can't free single
+        // arrays: start over, keeping its chunks. Nothing points into the
+        // slab between alignments.
+        if self.mixed_lengths {
+            if self.slab_mode == SlabMode::Reuse {
+                self.clear();
+                return;
+            }
+            self.free_list.clear();
+            for (i, wf) in self.wavefronts.iter_mut().enumerate() {
+                if wf.status == WavefrontStatus::Deallocated {
+                    continue;
+                }
+                if wf.wf_elements_allocated == self.init_wf_length {
+                    wf.status = WavefrontStatus::Free;
+                    self.free_list.push(i);
+                } else {
+                    self.memory_used -= wf.get_size();
+                    wf.status = WavefrontStatus::Deallocated;
+                    self.dealloc_list.push(i);
+                }
+            }
+            self.oversize_arena.reset();
+            self.mixed_lengths = false;
+            return;
+        }
         // Do NOT reset current_wf_length: wavefronts on the free list are already
-        // sized at current_wf_length, so ensure_min_length will skip reap_free().
+        // sized at current_wf_length, so allocate() can reuse them directly.
         self.free_list.clear();
         for (i, wf) in self.wavefronts.iter_mut().enumerate() {
             if wf.status != WavefrontStatus::Deallocated {
@@ -211,8 +258,11 @@ impl WavefrontSlab {
         // With arena, just clear everything and reset
         self.wavefronts.clear();
         self.free_list.clear();
+        self.dealloc_list.clear();
+        self.mixed_lengths = false;
         self.memory_used = 0;
         self.arena.reset();
+        self.oversize_arena.reset();
     }
 
     /// Clear the slab. Resets the arena (invalidates all offset/bt pointers).
@@ -221,20 +271,13 @@ impl WavefrontSlab {
         // so Wavefront::drop() skips all dealloc — the arena reset handles it.
         self.wavefronts.clear();
         self.free_list.clear();
+        self.dealloc_list.clear();
+        self.mixed_lengths = false;
         self.memory_used = 0;
         self.arena.reset();
+        self.oversize_arena.reset();
         if self.slab_mode == SlabMode::Tight {
             self.current_wf_length = self.init_wf_length;
-        }
-    }
-
-    /// Ensure the slab's current wavefront length covers the given diagonal range.
-    pub fn ensure_min_length(&mut self, min_lo: i32, max_hi: i32) {
-        let wf_length = wavefront_length(min_lo, max_hi);
-        if wf_length > self.current_wf_length {
-            let proposed = (wf_length as f32 * WF_SLAB_EXPAND_FACTOR) as i32;
-            self.current_wf_length = proposed;
-            self.reap_free();
         }
     }
 
@@ -348,12 +391,27 @@ impl WavefrontSlab {
     // --- Internal ---
 
     fn allocate_new(&mut self, wf_length: i32, min_lo: i32, max_hi: i32) -> WavefrontIdx {
-        let mut wf =
-            Wavefront::allocate_from_arena(&mut self.arena, wf_length, self.allocate_backtrace);
+        let oversize = self.slab_mode == SlabMode::Tight && wf_length != self.init_wf_length;
+        let arena = if oversize {
+            self.mixed_lengths = true;
+            &mut self.oversize_arena
+        } else {
+            &mut self.arena
+        };
+        let mut wf = Wavefront::allocate_from_arena(arena, wf_length, self.allocate_backtrace);
         wf.status = WavefrontStatus::Busy;
         wf.init(min_lo, max_hi);
         self.memory_used += wf.get_size();
+        if let Some(idx) = self.dealloc_list.pop() {
+            self.wavefronts[idx] = wf;
+            return idx;
+        }
         let idx = self.wavefronts.len();
+        // A reallocation would invalidate the pointers components hold.
+        debug_assert!(
+            idx < self.wavefronts.capacity(),
+            "wavefront slab Vec would reallocate (len {idx})"
+        );
         self.wavefronts.push(wf);
         idx
     }
@@ -375,6 +433,7 @@ impl WavefrontSlab {
                         self.free_list.push(i); // large enough — keep on free list
                     } else {
                         wf.status = WavefrontStatus::Deallocated; // too small — discard
+                        self.dealloc_list.push(i);
                     }
                 }
                 WavefrontStatus::Deallocated => {} // already dead
@@ -404,6 +463,10 @@ impl WavefrontSlab {
             }
         }
         self.wavefronts.truncate(valid_idx);
+        self.dealloc_list.clear();
+        self.mixed_lengths = false;
+        // Only current-length wavefronts remain, none from the oversize arena.
+        self.oversize_arena.reset();
     }
 }
 

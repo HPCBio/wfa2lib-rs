@@ -57,6 +57,12 @@ pub struct WavefrontComponents<const N: usize> {
     pub historic_max_hi: i32,
     /// Minimum lo-limit seen during current alignment.
     pub historic_min_lo: i32,
+    /// C's `historic_min_lo`/`historic_max_hi`: the diagonal range output
+    /// wavefronts are allocated over, grown as the wavefronts spread
+    /// (`Aligner::output_alloc_range`). `historic_*` above stay the fixed
+    /// limits the computed ranges are clamped to.
+    pub alloc_min_lo: i32,
+    pub alloc_max_hi: i32,
     /// Number of flat slots used by the previous alignment (= last_score + 1).
     /// Used in non-modular mode to clear only the needed range on the next alignment.
     pub prev_score_count: usize,
@@ -118,6 +124,8 @@ impl<const N: usize> WavefrontComponents<N> {
             max_score_scope,
             historic_max_hi: 0,
             historic_min_lo: 0,
+            alloc_min_lo: 0,
+            alloc_max_hi: 0,
             prev_score_count: 0,
             arrays: std::array::from_fn(|_| vec![WF_PTR_NONE; num_wavefronts]),
             wavefront_null,
@@ -155,6 +163,8 @@ impl<const N: usize> WavefrontComponents<N> {
         }
         self.historic_max_hi = 0;
         self.historic_min_lo = 0;
+        self.alloc_min_lo = 0;
+        self.alloc_max_hi = 0;
         if let Some(ref mut bt_buffer) = self.bt_buffer {
             bt_buffer.clear();
         }
