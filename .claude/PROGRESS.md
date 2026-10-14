@@ -127,3 +127,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   from one runner's CPU can crash on another. Its
   first run on x86 found HPCBio/wfa2lib-rs#34 (C's AVX2 ends-free kernel)
   and x86-only clippy errors.
+- **2026-10-13:** HPCBio/wfa2lib-rs#31 high-memory allocation: wavefronts
+  allocated over C's growing range and a "tight" slab in CIGAR mode, as C.
+  Long pairs now match C's memory and time (utest affine 927 → 275 MB,
+  affine2p 3.5 → 1.8 GB; ends-free affine2p match < 0 18.8 s → 3.4 s vs
+  C 4.2 s); 1 kb benchmark within ±3%. See PERFORMANCE_LOG.
