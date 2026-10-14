@@ -343,3 +343,33 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   compaction can be tested on small inputs. It never changes results.
 - **Test:** `aligner::tests::test_piggyback_compaction_keeps_alignment`
   (forced compaction at score 6000 gives the same CIGAR, `med` and `low`).
+
+## 12. Med/low: begin-free seed at score 0 backtraced from (0, 0) (match == 0)
+
+- **Symptom:** ends-free with begin gaps, match == 0, `med`/`low`: if the
+  alignment ended on a begin-free seed's diagonal at score 0, the CIGAR
+  started at (0, 0) instead of at the seed, and was invalid. Example: gap-linear `0,3,3`,
+  `P=G`, `T=TCGGGACATCGAG`, ends-free `0,0,4,11`: Rust `med` gave `1M12I`,
+  C and Rust `high` give `2I1M10I`.
+- **Cause:** `init_alignment` set the seeds' backtrace blocks but not the
+  wavefront's written range, so `bt_or_zero` read them as unwritten (block
+  0, the (0, 0) start). C reads the cells directly.
+- **Fix:** mark the seeded range `[-P0, T0]` written. (Unrelated to
+  HPCBio/wfa2lib-rs#18, which is about the *initialized* range in C's
+  high-memory backtrace.)
+- **Test:** `aligner::tests::test_endsfree_begin_free_seed_backtrace_med_low`.
+  Found by a DP-oracle sweep (HPCBio/wfa2lib-rs#32 work).
+
+## 13. Affine2p modular slots leaked I2/D2 wavefronts (memory safety)
+
+- **Symptom:** score-only (or med/low) affine2p could segfault. Debug builds
+  hit `wavefront slab Vec would reallocate`. Found with ends-free and
+  match < 0, but the bug is in the step itself.
+- **Cause:** when no I2/D2 input is live, `compute_affine2p_step` uses the
+  affine kernel and stores NULL for I2/D2. In modular mode it overwrote the
+  slot's previous I2/D2 wavefronts without returning them to the slab. The
+  slab then outgrew the capacity reserved in `init_alignment`, its Vec
+  reallocated, and every wavefront pointer held by the components dangled.
+- **Fix:** free the slot's old I2/D2 before storing NULL (as
+  `reuse_or_allocate` does for stored wavefronts).
+- **Test:** `aligner::tests::test_affine2p_modular_slots_release_i2_d2`.

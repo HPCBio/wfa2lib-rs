@@ -802,6 +802,11 @@ impl<const N: usize> WavefrontAligner<N> {
                 // (widened later by the gap-metric `init_ends`, never by edit).
                 (*wf_ptr).lo = -p0;
                 (*wf_ptr).hi = t0;
+                // The seeds' backtraces are valid (read by med/low when the
+                // alignment ends on a seed's diagonal at score 0).
+                if self.wf_components.bt_buffer.is_some() {
+                    (*wf_ptr).mark_written(-p0, t0);
+                }
             }
         }
         self.wf_components.set_m_ptr(0, wf_ptr);
@@ -1891,7 +1896,19 @@ impl<const N: usize> WavefrontAligner<N> {
             }
         }
 
-        // Store in components using pre-computed slot — NULL for skipped I2/D2 wavefronts
+        // Store in components using pre-computed slot — NULL for skipped I2/D2
+        // wavefronts, releasing the modular slot's previous ones (else they
+        // leak, and the slab outgrows its reserve and moves the wavefronts).
+        if self.wf_components.memory_modular {
+            if !i2_stored {
+                self.wavefront_slab
+                    .free_ptr(self.wf_components.get_i2_ptr_slot(out_slot));
+            }
+            if !d2_stored {
+                self.wavefront_slab
+                    .free_ptr(self.wf_components.get_d2_ptr_slot(out_slot));
+            }
+        }
         self.wf_components.set_m_ptr_slot(out_slot, m_curr_ptr);
         self.wf_components.set_i1_ptr_slot(out_slot, i1_curr_ptr);
         self.wf_components.set_i2_ptr_slot(out_slot, if i2_stored { i2_curr_ptr } else { WF_PTR_NONE });
@@ -3190,6 +3207,51 @@ mod tests {
             edit.set_alignment_free_ends(5, 0, 3, 0);
             assert_eq!(edit.align_endsfree(pattern, text), score);
         }
+    }
+
+    #[test]
+    fn test_endsfree_begin_free_seed_backtrace_med_low() {
+        // match == 0: the alignment ends on a begin-free seed's diagonal at
+        // score 0. Med/low read the seed's backtrace as unwritten and
+        // started the CIGAR at (0, 0) (`1M12I`, invalid); C gives `2I1M10I`.
+        let (pattern, text) = (b"G".as_slice(), b"TCGGGACATCGAG".as_slice());
+        for mode in [MemoryMode::High, MemoryMode::Med, MemoryMode::Low] {
+            let mut a = EditAligner::new(WavefrontPenalties::new_linear(
+                crate::penalties::LinearPenalties {
+                    match_: 0,
+                    mismatch: 3,
+                    indel: 3,
+                },
+            ));
+            a.set_memory_mode(mode);
+            a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+            a.set_alignment_free_ends(0, 0, 4, 11);
+            a.align_endsfree(pattern, text);
+            assert_eq!(a.cigar().to_string_rle(true), "2I1M10I", "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn test_affine2p_modular_slots_release_i2_d2() {
+        // Score-only affine2p: steps that skip I2/D2 (affine kernel) must
+        // release the modular slot's old I2/D2, else the slab outgrows its
+        // reserve and reallocates under the components' pointers (debug
+        // builds assert; release builds could segfault).
+        let penalties = WavefrontPenalties::new_affine2p(crate::penalties::Affine2pPenalties {
+            match_: -3,
+            mismatch: 6,
+            gap_opening1: 1,
+            gap_extension1: 5,
+            gap_opening2: 9,
+            gap_extension2: 1,
+        });
+        let mut a = Affine2pAligner::new(penalties);
+        a.set_alignment_free_ends(0, 33, 0, 35);
+        a.align_endsfree(
+            b"TGGATTGAGATTCCCCGGTATGCTGACAGAAGC",
+            b"ACATTCCGACATAGAGCCATATGATAAAAGTTAGT",
+        );
+        assert_eq!(a.status(), AlignStatus::Completed);
     }
 
     #[test]

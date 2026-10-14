@@ -132,3 +132,6 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   Long pairs now match C's memory and time (utest affine 927 → 275 MB,
   affine2p 3.5 → 1.8 GB; ends-free affine2p match < 0 18.8 s → 3.4 s vs
   C 4.2 s); 1 kb benchmark within ±3%. See PERFORMANCE_LOG.
+- **2026-10-14:** two Rust bugs found by a DP-oracle sweep: the `med`/`low`
+  begin-free seed backtrace (match == 0, invalid CIGAR; FIXED_BUGS 12) and
+  the affine2p modular-slot leak, which could segfault (FIXED_BUGS 13).
