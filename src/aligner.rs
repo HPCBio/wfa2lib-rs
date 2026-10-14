@@ -5,7 +5,7 @@ use crate::bialign::{
     self, BIALIGN_FALLBACK_MIN_LENGTH, BIALIGN_FALLBACK_MIN_SCORE, BIALIGN_RECOVERY_MIN_SCORE,
     BiAlignBreakpoint, ComponentType,
 };
-use crate::bt_buffer::BacktraceBuffer;
+use crate::bt_buffer::{BT_BLOCK_IDX_NULL, BacktraceBuffer};
 use crate::cigar::Cigar;
 use crate::components::WavefrontComponents;
 use crate::compute;
@@ -13,13 +13,13 @@ use crate::compute::{affine, affine2p, edit, linear, piggyback};
 use crate::extend;
 use crate::heuristic::{self, HeuristicState, HeuristicStrategy};
 use crate::offset::{DPMATRIX_DIAGONAL_NULL, OFFSET_NULL, WfOffset, wavefront_h, wavefront_v};
-use crate::pcigar::PCIGAR_MAX_LENGTH;
+use crate::pcigar::{PCIGAR_MAX_LENGTH, Pcigar};
 use crate::penalties::{DistanceMetric, WavefrontPenalties};
 use crate::sequences::{SequenceMode, WavefrontSequences};
 use crate::components::WF_PTR_NONE;
 use crate::slab::{SlabMode, WavefrontSlab};
 use crate::termination;
-use crate::wavefront::{WavefrontPos, WavefrontStatus};
+use crate::wavefront::{BtBlockIdx, WavefrontPos, WavefrontStatus};
 
 /// Alignment computation scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,58 @@ pub enum MemoryMode {
     Med,
     /// Piggyback backtrace, offloading packed CIGARs only when (nearly) full.
     Low,
+}
+
+/// Whether to reproduce known C WFA2-lib bugs (HPCBio/wfa2lib-rs#32).
+///
+/// By default the aligner's output is identical to C WFA2-lib, including
+/// results that C gets wrong. [`Compat::Corrected`] fixes these known
+/// issues, so output can differ from C in exactly those cases:
+///
+/// - **Ends-free with a match reward** (`match < 0`): C ends the alignment
+///   at the first cell to reach a free end, but with a match reward the
+///   score of an ends-free alignment depends on how many bases its free end
+///   gaps skip, so that cell need not be the best. The result can be
+///   suboptimal, from a trailing-end miss of a point or two
+///   (smarco/WFA2-lib#102) to a shift by a repeat unit (HPCBio/wfa2lib-rs#37)
+///   or the all-gap, no-overlap alignment when the free ends span whole
+///   sequences (HPCBio/wfa2lib-rs#38). Corrected mode charges skipped
+///   trailing bases like the begin-free ones and returns the optimal
+///   alignment. Its score, as returned by
+///   [`WavefrontAligner::align_endsfree`], is then the WFA score of the whole
+///   alignment, free end gaps included, so
+///   [`WavefrontPenalties::wf_score_to_sw_score`] with the full sequence
+///   lengths gives its real score. Also applies to extension alignment.
+///   It can take more steps than C (up to the optimal score).
+///
+/// - **Edit/indel ends-free with begin gaps** (HPCBio/wfa2lib-rs#18, a C
+///   regression from `380eb31b`, reported as smarco/WFA2-lib#142): C can
+///   return an invalid CIGAR (a mismatching column as `M`; the score is
+///   right). Corrected mode marks the begin-free seeds as initialized, the
+///   fix proposed upstream, so the backtrace can reach them.
+///
+/// Gap-linear/affine/affine2p with `match == 0` give identical results in
+/// both modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Compat {
+    /// Output identical to C WFA2-lib, including its known bugs (the default).
+    #[default]
+    C,
+    /// Fix the known C bugs listed in [`Compat`].
+    Corrected,
+}
+
+/// Corrected-mode ends-free end candidate: the best cell reaching a free
+/// end so far, and its total score (see [`Compat::Corrected`]).
+#[derive(Debug, Clone, Copy)]
+struct EndsfreeCandidate {
+    /// Score at the cell plus `-match` per skipped trailing base.
+    total: i32,
+    /// The cell (score, k, offset).
+    pos: WavefrontPos,
+    /// The cell's piggyback backtrace `(pcigar, prev)` (med/low), kept from
+    /// compaction while it is the candidate.
+    bt: (Pcigar, BtBlockIdx),
 }
 
 /// Alignment span mode.
@@ -112,6 +164,11 @@ pub struct WavefrontAligner<const N: usize> {
     pub text_begin_free: i32,
     pub text_end_free: i32,
     pub extension: bool,
+
+    /// C compatibility or corrected behaviour (see [`Compat`]).
+    pub compat: Compat,
+    /// Corrected-mode ends-free end candidate (see [`Compat::Corrected`]).
+    endsfree_best: Option<EndsfreeCandidate>,
 
     // Heuristic
     pub heuristic: HeuristicStrategy,
@@ -351,6 +408,8 @@ impl<const N: usize> WavefrontAligner<N> {
             text_begin_free: 0,
             text_end_free: 0,
             extension: false,
+            compat: Compat::C,
+            endsfree_best: None,
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
             memory_mode: MemoryMode::High,
@@ -395,7 +454,12 @@ impl<const N: usize> WavefrontAligner<N> {
         if buf.get_size_used() <= self.max_memory_compact {
             return;
         }
-        self.wf_components.compact_bt_buffer(score as usize);
+        let mut pinned = self.endsfree_best.map_or(BT_BLOCK_IDX_NULL, |b| b.bt.1);
+        self.wf_components
+            .compact_bt_buffer(score as usize, &mut pinned);
+        if let Some(b) = self.endsfree_best.as_mut() {
+            b.bt.1 = pinned;
+        }
         let max_partial_compacts = if self.memory_mode == MemoryMode::Low {
             1
         } else {
@@ -450,13 +514,17 @@ impl<const N: usize> WavefrontAligner<N> {
     ///
     /// - **Edit/indel with begin gaps** (`*_begin_free > 0`) can return an
     ///   invalid CIGAR: a mismatching column reported as `M`. The score is
-    ///   correct, and gap-linear/affine/affine2p are unaffected. Use
-    ///   [`crate::cigar::Cigar::check_alignment`] if this matters. This is a
+    ///   correct, and gap-linear/affine/affine2p are unaffected. This is a
     ///   regression in C WFA2-lib (from commit `380eb31b`); tracked in
-    ///   <https://github.com/HPCBio/wfa2lib-rs/issues/18>.
+    ///   <https://github.com/HPCBio/wfa2lib-rs/issues/18>. Fixed by
+    ///   [`Compat::Corrected`].
     /// - **With a match reward** (`match < 0`), the chosen ends-free alignment
-    ///   can be suboptimal, depending on argument order:
-    ///   <https://github.com/smarco/WFA2-lib/issues/102>.
+    ///   can be suboptimal (<https://github.com/smarco/WFA2-lib/issues/102>):
+    ///   shifted by a repeat unit
+    ///   (<https://github.com/HPCBio/wfa2lib-rs/issues/37>), or, when the free
+    ///   ends span whole sequences, the all-gap alignment
+    ///   (<https://github.com/HPCBio/wfa2lib-rs/issues/38>). Fixed by
+    ///   [`Compat::Corrected`] (see [`Self::set_compat`]).
     pub fn set_alignment_free_ends(
         &mut self,
         pattern_begin_free: i32,
@@ -479,6 +547,12 @@ impl<const N: usize> WavefrontAligner<N> {
     pub fn set_alignment_extension(&mut self) {
         self.alignment_span = AlignmentSpan::EndsFree;
         self.extension = true;
+    }
+
+    /// Choose C-compatible output (the default) or corrected behaviour for
+    /// known C WFA2-lib bugs (see [`Compat`]).
+    pub fn set_compat(&mut self, compat: Compat) {
+        self.compat = compat;
     }
 
     /// Set the heuristic strategy for wavefront pruning.
@@ -632,19 +706,37 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.prev_score_count = (score + 1) as usize;
 
         // Finalize
+        let mut result = score;
         if self.status == AlignStatus::EndReached || self.status == AlignStatus::EndUnreachable {
             let unreachable = self.status == AlignStatus::EndUnreachable;
+
+            // Corrected mode: the end candidate's cell can be from an earlier
+            // score, and its total is the alignment's score.
+            let candidate = self.endsfree_best.filter(|_| !unreachable);
+            if let Some(best) = candidate {
+                result = best.total;
+            }
 
             // Backtrace to produce CIGAR if requested
             if self.alignment_scope == AlignmentScope::ComputeAlignment
                 && (self.status == AlignStatus::EndReached
                     || self.alignment_end_pos.offset != OFFSET_NULL)
             {
-                self.backtrace_from(
-                    score,
-                    self.alignment_end_pos.k,
-                    self.alignment_end_pos.offset,
-                );
+                if let Some(best) = candidate {
+                    let WavefrontPos { score, k, offset } = best.pos;
+                    if self.wf_components.bt_piggyback {
+                        self.backtrace_piggyback_bt(best.bt, score, k, offset);
+                    } else {
+                        self.backtrace_from(score, k, offset);
+                    }
+                    self.cigar.score = best.total;
+                } else {
+                    self.backtrace_from(
+                        score,
+                        self.alignment_end_pos.k,
+                        self.alignment_end_pos.offset,
+                    );
+                }
 
                 // Post-processing: extension mode or unreachable → maxtrim
                 if self.extension || unreachable {
@@ -666,7 +758,7 @@ impl<const N: usize> WavefrontAligner<N> {
             }
         }
 
-        score
+        result
     }
 
     /// Get the alignment status after the last alignment.
@@ -749,6 +841,7 @@ impl<const N: usize> WavefrontAligner<N> {
             offset: OFFSET_NULL,
         };
         self.heuristic_state.reset(&self.heuristic);
+        self.endsfree_best = None;
 
         // Compute allocation limits based on sequence lengths.
         // k ranges from -plen to +tlen, so we need wavefronts that cover this
@@ -802,6 +895,13 @@ impl<const N: usize> WavefrontAligner<N> {
                 // (widened later by the gap-metric `init_ends`, never by edit).
                 (*wf_ptr).lo = -p0;
                 (*wf_ptr).hi = t0;
+                // Corrected mode: the seeds are initialized too, so the
+                // edit/indel backtrace can step onto them (HPCBio/wfa2lib-rs#18,
+                // the fix proposed in smarco/WFA2-lib#142).
+                if self.compat == Compat::Corrected {
+                    (*wf_ptr).wf_elements_init_min = -p0;
+                    (*wf_ptr).wf_elements_init_max = t0;
+                }
                 // The seeds' backtraces are valid (read by med/low when the
                 // alignment ends on a seed's diagonal at score 0).
                 if self.wf_components.bt_buffer.is_some() {
@@ -864,6 +964,9 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Extend the M-wavefront at the given score with ends-free termination.
     /// Returns true if alignment is finished.
     fn extend_endsfree(&mut self, score: i32) -> bool {
+        if self.endsfree_corrected() {
+            return self.extend_endsfree_corrected(score);
+        }
         let score_idx = score as usize;
         let m_ptr = self.wf_components.get_m_ptr(score_idx);
 
@@ -911,6 +1014,93 @@ impl<const N: usize> WavefrontAligner<N> {
         false
     }
 
+    /// Whether ends-free termination uses the corrected rule (see
+    /// [`Compat::Corrected`]); with `match == 0` both rules agree.
+    #[inline(always)]
+    fn endsfree_corrected(&self) -> bool {
+        self.compat == Compat::Corrected && self.penalties.match_ < 0
+    }
+
+    /// Corrected-mode [`Self::extend_endsfree`] (see [`Compat::Corrected`]).
+    ///
+    /// With a match reward the WFA score of an ends-free alignment is
+    /// `2 * penalty + (-match) * (aligned bases)`, so on its own it doesn't
+    /// rank alignments that leave different numbers of bases to free end
+    /// gaps. Counting each free-gap base as `-match`, as C already does for
+    /// begin-free ones (`endsfree_begin_k`), makes the total
+    /// `2 * penalty + (-match) * (|P| + |T|)` for every alignment. A cell
+    /// reaching a free end at `score` with `left` bases to skip is then a
+    /// complete alignment of total `score + (-match) * left`. Every later
+    /// cell totals more than the current score, so the best candidate is
+    /// optimal once the current score reaches its total.
+    fn extend_endsfree_corrected(&mut self, score: i32) -> bool {
+        let m_ptr = self.wf_components.get_m_ptr(score as usize);
+
+        if !m_ptr.is_null() {
+            let wf = unsafe { &mut *m_ptr };
+            let found = if self.sequences.mode == SequenceMode::Lambda {
+                extend::extend_matches_custom_endsfree_best(
+                    &self.sequences,
+                    wf,
+                    self.pattern_end_free,
+                    self.text_end_free,
+                )
+            } else {
+                extend::extend_matches_packed_endsfree_best(
+                    &self.sequences,
+                    wf,
+                    self.pattern_end_free,
+                    self.text_end_free,
+                )
+            };
+            if let Some((k, offset, left)) = found {
+                let total = score + (-self.penalties.match_) * left;
+                if self.endsfree_best.is_none_or(|b| total < b.total) {
+                    let bt = if self.wf_components.bt_piggyback {
+                        wf.bt_or_zero(k)
+                    } else {
+                        (0, BT_BLOCK_IDX_NULL)
+                    };
+                    self.endsfree_best = Some(EndsfreeCandidate {
+                        total,
+                        pos: WavefrontPos { score, k, offset },
+                        bt,
+                    });
+                }
+            }
+        }
+
+        // No later cell can beat the candidate
+        if let Some(best) = self.endsfree_best
+            && best.total <= score
+        {
+            self.alignment_end_pos = best.pos;
+            self.status = AlignStatus::EndReached;
+            return true;
+        }
+
+        let done = if m_ptr.is_null() {
+            // Null steps are counted by the compute steps (as in C).
+            self.num_null_steps > self.wf_components.max_score_scope as i32
+        } else {
+            !matches!(self.heuristic, HeuristicStrategy::None)
+                && self.apply_heuristic_cutoff(score, m_ptr)
+        };
+        if done {
+            // Nothing left to search (or pruned by the heuristic): the
+            // candidate, if any, is the alignment.
+            if let Some(best) = self.endsfree_best {
+                self.alignment_end_pos = best.pos;
+                self.status = AlignStatus::EndReached;
+            } else {
+                self.status = AlignStatus::EndUnreachable;
+            }
+            return true;
+        }
+
+        false
+    }
+
     /// Backtrace the CIGAR from M-wavefront cell (`k`, `offset`), starting at
     /// `score` (C's `wavefront_unialign_terminate`).
     fn backtrace_from(&mut self, score: i32, k: i32, offset: WfOffset) {
@@ -939,7 +1129,19 @@ impl<const N: usize> WavefrontAligner<N> {
             self.cigar.end_offset = 0;
             return;
         }
-        let (pcigar, prev) = unsafe { (*m).bt_or_zero(k) };
+        let bt = unsafe { (*m).bt_or_zero(k) };
+        self.backtrace_piggyback_bt(bt, score, k, offset);
+    }
+
+    /// Unpack the packed-CIGAR chain `(pcigar, prev)` of M-wavefront cell
+    /// (`k`, `offset`) at `score` into the CIGAR.
+    fn backtrace_piggyback_bt(
+        &mut self,
+        (pcigar, prev): (Pcigar, BtBlockIdx),
+        score: i32,
+        k: i32,
+        offset: WfOffset,
+    ) {
         let buf = self.wf_components.bt_buffer.as_mut().unwrap();
         let init = buf.traceback_from(pcigar, prev);
         let init_pos = buf.alignment_init_pos[init.pcigar as usize];
@@ -2120,6 +2322,8 @@ impl<const N: usize> WavefrontAligner<N> {
             text_begin_free: 0,
             text_end_free: 0,
             extension: false,
+            compat: Compat::C,
+            endsfree_best: None,
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
             memory_mode: MemoryMode::High,

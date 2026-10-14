@@ -8,7 +8,7 @@ use clap::Parser;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use wfa2lib_rs::aligner::{
-    Affine2pAligner, AffineAligner, AlignStatus, AlignmentScope, EditAligner, MemoryMode,
+    Affine2pAligner, AffineAligner, AlignStatus, AlignmentScope, Compat, EditAligner, MemoryMode,
 };
 use wfa2lib_rs::cigar::Cigar;
 use wfa2lib_rs::heuristic::HeuristicStrategy;
@@ -74,6 +74,11 @@ struct Cli {
     /// Verbosity level
     #[arg(short = 'v', long)]
     verbose: Option<i32>,
+
+    /// Fix known C WFA2-lib bugs instead of reproducing them (Rust only;
+    /// output can then differ from C, see `Compat::Corrected`)
+    #[arg(long)]
+    no_c_compat: bool,
 }
 
 /// Streams pattern/text pairs from a `.seq` file (alternating `>pattern` and
@@ -390,6 +395,14 @@ impl AnyAligner {
         }
     }
 
+    fn set_compat(&mut self, compat: Compat) {
+        match self {
+            AnyAligner::N1(a) => a.set_compat(compat),
+            AnyAligner::N3(a) => a.set_compat(compat),
+            AnyAligner::N5(a) => a.set_compat(compat),
+        }
+    }
+
     fn set_heuristic(&mut self, strategy: HeuristicStrategy) {
         match self {
             AnyAligner::N1(a) => a.set_heuristic(strategy),
@@ -515,6 +528,9 @@ fn main() {
     }
 
     aligner.set_memory_mode(memory_mode);
+    if cli.no_c_compat {
+        aligner.set_compat(Compat::Corrected);
+    }
 
     if let Some(max_steps) = cli.wfa_max_steps {
         aligner.set_max_alignment_steps(max_steps);

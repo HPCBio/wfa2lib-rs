@@ -41,6 +41,7 @@ src/
     align_benchmark.rs         -- CLI driver binary
 tests/
   cli_output.rs                -- CLI output tests (expected outputs from C)
+  corrected_endsfree.rs        -- Compat::Corrected ends-free vs a DP oracle
   test_vs_reference.rs         -- library vs C reference outputs
   wfa_utest.sh                 -- stock C unit tests on the Rust CLI
   data/                        -- CLI test fixtures
