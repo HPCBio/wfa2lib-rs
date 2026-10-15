@@ -14,6 +14,13 @@ Usage (from the repository root):
     bench/sweep.py --quick             # 1/10 of the pairs, 1 run each
     bench/sweep.py --suites core span  # core, span, heur
     bench/sweep.py --pin 3             # Linux: run on CPU 3 (taskset)
+    bench/sweep.py --offline           # node without network (see below)
+
+Offline (e.g. a compute node): with network, clone this repository, clone
+https://github.com/smarco/WFA2-lib into ./WFA2-lib, and run `cargo fetch`.
+On the node, run with --offline. Builds happen on the node: Rust and the
+native C build target the CPU they're built on, so they live in per-host
+directories and are never reused from another machine (a login node).
 
 Results go to target/bench-sweep/<host>/: results.tsv (one row per tool
 and case) and summary.md (ratios vs C, machine info). Single-threaded:
@@ -231,18 +238,46 @@ def md5(path):
     return h.hexdigest()
 
 
-def build(no_c_native):
+def host_name():
+    return socket.gethostname().split(".")[0]
+
+
+def rust_target_dir():
+    """Per-host: Rust is built with target-cpu=native, which cargo doesn't
+    track, so a binary built on another machine (e.g. a login node) would be
+    reused here."""
+    return os.path.join(ROOT, "target", "bench-sweep", "build-" + host_name())
+
+
+def c_dirs():
+    commit = open(os.path.join(ROOT, "tests", "differential", "C_COMMIT")).read().strip()
+    base = os.path.join(ROOT, "target", "differential", "c-" + commit)
+    # The native build is per host too (see build_c.sh)
+    return commit, base, base + "-native-" + host_name()
+
+
+def build(no_c_native, offline):
     def sh(cmd, env=None):
         print("+ " + " ".join(cmd), file=sys.stderr)
         lines = subprocess.check_output(cmd, cwd=ROOT, env=env).decode().strip().splitlines()
         return lines[-1] if lines else ""
-    sh(["cargo", "build", "--release", "--bin", "align_benchmark"])
-    tools = {"Rust": os.path.join(ROOT, "target", "release", "align_benchmark")}
+    commit, _, _ = c_dirs()
+    if offline and not os.environ.get("WFA2_LIB_REPO"):
+        repo = os.path.join(ROOT, "WFA2-lib")
+        ok = os.path.isdir(os.path.join(repo, ".git")) and subprocess.call(
+            ["git", "-C", repo, "cat-file", "-e", commit + "^{commit}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+        if not ok:
+            sys.exit("--offline: needs a WFA2-lib git checkout containing %s at ./WFA2-lib (or "
+                     "WFA2_LIB_REPO=<path>). With network: git clone https://github.com/smarco/WFA2-lib"
+                     % commit)
+    env = dict(os.environ, CARGO_TARGET_DIR=rust_target_dir())
+    sh(["cargo", "build", "--release", "--bin", "align_benchmark"] + (["--offline"] if offline else []), env=env)
+    tools = {"Rust": os.path.join(rust_target_dir(), "release", "align_benchmark")}
     tools["C"] = sh(["bash", "tests/differential/build_c.sh"])
     if not no_c_native:
-        env = dict(os.environ, C_NATIVE="1")
         try:
-            tools["C-native"] = sh(["bash", "tests/differential/build_c.sh"], env=env)
+            tools["C-native"] = sh(["bash", "tests/differential/build_c.sh"], env=dict(os.environ, C_NATIVE="1"))
         except subprocess.CalledProcessError:
             print("C -march=native build failed; skipping C-native", file=sys.stderr)
     return tools
@@ -260,25 +295,30 @@ def main():
     ap.add_argument("--filter", default=None, help="only cases whose name matches this regex")
     ap.add_argument("--pin", type=int, default=None, help="Linux: pin runs to this CPU (taskset)")
     ap.add_argument("--no-c-native", action="store_true", help="skip the -march=native C build")
-    ap.add_argument("--no-build", action="store_true", help="use existing builds")
+    ap.add_argument("--no-build", action="store_true", help="use existing builds (from this host)")
+    ap.add_argument("--offline", action="store_true",
+                    help="no network: cargo --offline (run `cargo fetch` beforehand) and C from ./WFA2-lib")
     ap.add_argument("--out", default=None, help="output directory")
     a = ap.parse_args()
     reps = a.reps or (1 if a.quick else 3)
-    host = socket.gethostname().split(".")[0]
+    host = host_name()
     outdir = a.out or os.path.join(ROOT, "target", "bench-sweep", host + ("-quick" if a.quick else ""))
     datadir = os.path.join(ROOT, "target", "bench-sweep", "data" + ("-quick" if a.quick else ""))
     os.makedirs(outdir, exist_ok=True)
     os.makedirs(datadir, exist_ok=True)
 
     if a.no_build:
-        tools = {"Rust": os.path.join(ROOT, "target", "release", "align_benchmark")}
-        commit = open(os.path.join(ROOT, "tests", "differential", "C_COMMIT")).read().strip()
-        for name, suffix in (("C", ""), ("C-native", "-native")):
-            path = os.path.join(ROOT, "target", "differential", "c-" + commit + suffix, "bin", "align_benchmark")
-            if os.path.exists(path) and not (suffix and a.no_c_native):
+        _, c_generic, c_native = c_dirs()
+        tools = {"Rust": os.path.join(rust_target_dir(), "release", "align_benchmark")}
+        for name, d in (("C", c_generic), ("C-native", c_native)):
+            path = os.path.join(d, "bin", "align_benchmark")
+            if os.path.exists(path) and not (name == "C-native" and a.no_c_native):
                 tools[name] = path
+        missing = [t for t in ("Rust", "C") if not os.path.exists(tools.get(t, ""))]
+        if missing:
+            sys.exit("--no-build: no %s binary built on this host; run without --no-build" % " or ".join(missing))
     else:
-        tools = build(a.no_c_native)
+        tools = build(a.no_c_native, a.offline)
     use_perf = perf_works()
 
     todo = cases(a.suites)

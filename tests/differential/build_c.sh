@@ -2,8 +2,8 @@
 # Build C WFA2-lib's align_benchmark at the pinned commit (C_COMMIT), or at
 # the commit given as $1, into target/differential/c-<commit>/.
 # With C_NATIVE=1, keep C's -march=native (its AVX2/AVX-512 kernels) and
-# build into c-<commit>-native/ instead; for benchmarks (bench/sweep.py),
-# not the harness.
+# build into c-<commit>-native-<host>/ instead (per host: it targets the
+# build machine's CPU); for benchmarks (bench/sweep.py), not the harness.
 #
 # Source: $WFA2_LIB_REPO (default: ./WFA2-lib if it is a git checkout,
 # else https://github.com/smarco/WFA2-lib).
@@ -19,7 +19,7 @@ if [ -z "${WFA2_LIB_REPO:-}" ]; then
     WFA2_LIB_REPO="https://github.com/smarco/WFA2-lib"
   fi
 fi
-DEST="$ROOT/target/differential/c-$COMMIT${C_NATIVE:+-native}"
+DEST="$ROOT/target/differential/c-$COMMIT${C_NATIVE:+-native-$(hostname -s)}"
 BIN="$DEST/bin/align_benchmark"
 
 if [ -x "$BIN" ]; then
