@@ -6,7 +6,7 @@
 # build machine's CPU); for benchmarks (bench/sweep.py), not the harness.
 #
 # Source: $WFA2_LIB_REPO (default: ./WFA2-lib if it is a git checkout,
-# else https://github.com/smarco/WFA2-lib).
+# else https://github.com/Marco-Sola-Lab/WFA2-lib).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -16,7 +16,7 @@ if [ -z "${WFA2_LIB_REPO:-}" ]; then
   if [ -d "$ROOT/WFA2-lib/.git" ]; then
     WFA2_LIB_REPO="$ROOT/WFA2-lib"
   else
-    WFA2_LIB_REPO="https://github.com/smarco/WFA2-lib"
+    WFA2_LIB_REPO="https://github.com/Marco-Sola-Lab/WFA2-lib"
   fi
 fi
 DEST="$ROOT/target/differential/c-$COMMIT${C_NATIVE:+-native-$(hostname -s)}"

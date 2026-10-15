@@ -1,6 +1,6 @@
 # Making a Rust-native port of WFA2-lib
 
-This project is designed to be an *output-identical*, *performance-competitive*, *feature-complete* and *Rust-native* port of [WFA2-lib](https://github.com/smarco/WFA2-lib), a library for time and 
+This project is designed to be an *output-identical*, *performance-competitive*, *feature-complete* and *Rust-native* port of [WFA2-lib](https://github.com/Marco-Sola-Lab/WFA2-lib), a library for time and 
 space-efficient sequence alignment.  
 
 ## Project Layout

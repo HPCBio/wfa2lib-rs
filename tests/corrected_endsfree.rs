@@ -1,5 +1,5 @@
 //! `Compat::Corrected` ends-free alignment with a match reward
-//! (HPCBio/wfa2lib-rs#37, #38, smarco/WFA2-lib#102), checked against a
+//! (HPCBio/wfa2lib-rs#37, #38, Marco-Sola-Lab/WFA2-lib#102), checked against a
 //! dynamic-programming oracle.
 
 use wfa2lib_rs::aligner::{AlignmentScope, Compat, MemoryMode, WavefrontAligner};
@@ -576,7 +576,7 @@ fn edit_pen(kind: usize) -> Pen {
     Pen::linear(0, if kind == 3 { 1 } else { 1000 }, 1)
 }
 
-/// HPCBio/wfa2lib-rs#18 (smarco/WFA2-lib#142): edit/indel ends-free with
+/// HPCBio/wfa2lib-rs#18 (Marco-Sola-Lab/WFA2-lib#142): edit/indel ends-free with
 /// begin gaps returns an invalid CIGAR in C; corrected mode is valid.
 #[test]
 fn issue_18_edit_begin_gaps() {

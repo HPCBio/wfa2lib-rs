@@ -148,7 +148,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   - `match != 0`: `wavefront_compute_endsfree_{required,limits,init,allocate_null}`
     add cell (d,0) / (0,d) at score d * -match, before the ends are trimmed.
 - **Fix (HPCBio/wfa2lib-rs#17, merged):** `28cb857` (match == 0) and
-  `6a06d8f` (match != 0). Also C's extension preset (P0 = T0 = 0) and smarco/WFA2-lib#126's
+  `6a06d8f` (match != 0). Also C's extension preset (P0 = T0 = 0) and Marco-Sola-Lab/WFA2-lib#126's
   restriction of the seeding to the ends-free span.
 - **Parity details reproduced:**
   - C sets only `lo/hi` on M0; the initialized range stays `[0, 0]`.
@@ -166,7 +166,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
     CIGARs.
   - Rust reproduces it for output identity, documented on
     `set_alignment_free_ends`. **Known issue HPCBio/wfa2lib-rs#18.**
-  - Reported upstream as smarco/WFA2-lib#142, with a reproducer and a
+  - Reported upstream as Marco-Sola-Lab/WFA2-lib#142, with a reproducer and a
     verified one-line fix: set `wf_elements_init_min/max = lo/hi` on M0 in
     `wavefront_aligner_init_wf_m`.
 - **Result:** ends-free (begin and/or end gaps) and extension are
@@ -224,7 +224,7 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   1. *Banded-adaptive.* C samples the wavefront at 4 points and shifts the
      `[lo, hi]` window towards the furthest-reaching diagonals; Rust clamped
      to the static band.
-  2. *smarco/WFA2-lib#125 (C 6565731 / 7ea485e).* C HEAD clamps computed
+  2. *Marco-Sola-Lab/WFA2-lib#125 (C 6565731 / 7ea485e).* C HEAD clamps computed
      limits to `[min_k, max_k]` in `wavefront_compute_limits_heuristic`
      (linear, affine, affine2p), and shifts the band into each BiWFA
      sub-problem. C also creates components for 1000 × 1000 up front, which
@@ -379,11 +379,11 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
 `Compat::Corrected` (CLI `--no-c-compat`) is a per-aligner opt-in that fixes
 known C bugs; the default `Compat::C` stays output-identical to C. It covers:
 
-### 14a. Ends-free with match < 0 (HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38, smarco/WFA2-lib#102)
+### 14a. Ends-free with match < 0 (HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38, Marco-Sola-Lab/WFA2-lib#102)
 
 - **Symptom (C and C-compatible Rust):** with a match reward, ends-free
   alignment can return a suboptimal result: a trailing-end miss of a point
-  or two (smarco/WFA2-lib#102), a shift by one repeat unit (#37), or, with
+  or two (Marco-Sola-Lab/WFA2-lib#102), a shift by one repeat unit (#37), or, with
   free ends spanning whole sequences, the all-gap alignment (#38).
 - **Root cause:** with `match < 0`, WFA scores an alignment as
   `2 * penalty + M * (aligned bases)` (M = -match). For global alignment
@@ -445,7 +445,7 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
 
 ### 14b. Edit/indel ends-free with begin gaps: invalid CIGAR (HPCBio/wfa2lib-rs#18)
 
-- **C bug:** a regression from `380eb31b` (reported as smarco/WFA2-lib#142).
+- **C bug:** a regression from `380eb31b` (reported as Marco-Sola-Lab/WFA2-lib#142).
   For match == 0, M0's begin-free seeds get `lo/hi` but the initialized range
   stays `[0, 0]`, and edit/indel never widen it. So the backtrace can't step
   onto the seeds and emits unchecked `M`s.

@@ -17,7 +17,7 @@ Usage (from the repository root):
     bench/sweep.py --offline           # node without network (see below)
 
 Offline (e.g. a compute node): with network, clone this repository, clone
-https://github.com/smarco/WFA2-lib into ./WFA2-lib, and run `cargo fetch`.
+https://github.com/Marco-Sola-Lab/WFA2-lib into ./WFA2-lib, and run `cargo fetch`.
 On the node, run with --offline. Builds happen on the node: Rust and the
 native C build target the CPU they're built on, so they live in per-host
 directories and are never reused from another machine (a login node).
@@ -281,7 +281,7 @@ def build(no_c_native, offline):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
         if not ok:
             sys.exit("--offline: needs a WFA2-lib git checkout containing %s at ./WFA2-lib (or "
-                     "WFA2_LIB_REPO=<path>). With network: git clone https://github.com/smarco/WFA2-lib"
+                     "WFA2_LIB_REPO=<path>). With network: git clone https://github.com/Marco-Sola-Lab/WFA2-lib"
                      % commit)
     env = dict(os.environ, CARGO_TARGET_DIR=rust_target_dir())
     sh(["cargo", "build", "--release", "--bin", "align_benchmark"] + (["--offline"] if offline else []), env=env)
