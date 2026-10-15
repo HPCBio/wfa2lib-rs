@@ -154,3 +154,9 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   Also HPCBio/wfa2lib-rs#41: empty pattern + text no longer panics in debug
   (FIXED_BUGS 15). CI now also runs the tests in a debug build (Linux and
   macOS), so overflows like it fail CI.
+- **2026-10-15:** Rust-vs-C sweep (HPCBio/wfa2lib-rs#31): 301 configs, all
+  output identical to C; Rust faster or at parity almost everywhere. Gaps
+  (med/low kernels, indel med/low, high-memory CIGAR RSS, BiWFA sequence
+  copies) are now a checklist in HPCBio/wfa2lib-rs#31. `bench/sweep.py`
+  makes the sweep reproducible on other machines (C also built with
+  `-march=native`).
