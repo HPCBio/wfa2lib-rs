@@ -169,7 +169,7 @@ Max RSS (`/usr/bin/time -l`), 50,000 × 1 kb, same machine. "main" is
 ### 2026-10-13 — `feat/biwfa-heuristics-banded` vs `6031aa7` (main)
 
 Same machine and data, Rust only, minimum of 3 runs (ms). Covers
-banded-adaptive, smarco/WFA2-lib#125's band clamp with 1000 × 1000 initial
+banded-adaptive, Marco-Sola-Lab/WFA2-lib#125's band clamp with 1000 × 1000 initial
 components, BiWFA heuristic/status handling, and the top-level-only BiWFA length
 fallback (HPCBio/wfa2lib-rs#6, HPCBio/wfa2lib-rs#7):
 

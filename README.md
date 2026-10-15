@@ -1,6 +1,6 @@
 # wfa2lib-rs
 
-**A pure Rust port of [WFA2-lib](https://github.com/smarco/WFA2-lib)**, the wavefront alignment library for pairwise sequence alignment.
+**A pure Rust port of [WFA2-lib](https://github.com/Marco-Sola-Lab/WFA2-lib)**, the wavefront alignment library for pairwise sequence alignment.
 
 This project was created with [Claude Code](https://claude.ai/claude-code).
 
@@ -65,11 +65,11 @@ cargo test
 
 The integration tests (`tests/test_vs_reference.rs`) and the C-parity script
 (`tests/wfa_utest.sh`) compare against the reference outputs shipped with the
-C library, so they expect a [WFA2-lib](https://github.com/smarco/WFA2-lib)
+C library, so they expect a [WFA2-lib](https://github.com/Marco-Sola-Lab/WFA2-lib)
 checkout at `./WFA2-lib` (a symlink works; the path is gitignored):
 
 ```bash
-git clone https://github.com/smarco/WFA2-lib   # or: ln -s /path/to/WFA2-lib WFA2-lib
+git clone https://github.com/Marco-Sola-Lab/WFA2-lib   # or: ln -s /path/to/WFA2-lib WFA2-lib
 cargo test
 bash tests/wfa_utest.sh   # Rust align_benchmark vs WFA2-lib/tests/wfa.utest.check
 ```

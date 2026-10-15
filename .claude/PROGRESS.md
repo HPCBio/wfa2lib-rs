@@ -34,7 +34,7 @@ Checked with `tests/differential/run.sh` (1262 cases against the C commit in
 |---|---|
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
 | Stock `wfa.utest.sh` | 60/60 identical (BiWFA match < 0 tie-breaks fixed, HPCBio/wfa2lib-rs#7) |
-| banded-static (affine, affine2p, linear) | Byte-identical to C 3282f83 (with smarco/WFA2-lib#125's band clamp) in high / med / score-only modes, including unreachable pairs |
+| banded-static (affine, affine2p, linear) | Byte-identical to C 3282f83 (with Marco-Sola-Lab/WFA2-lib#125's band clamp) in high / med / score-only modes, including unreachable pairs |
 | banded-static (edit, indel) | Rust stops as unreachable; C never terminates (C bug, HPCBio/wfa2lib-rs#24) |
 | banded-adaptive | C's re-centred band ported (HPCBio/wfa2lib-rs#6): byte-identical to C 3282f83 in high / score-only / med / low (48/48) |
 | xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 3282f83 in high / score-only / med (556/576 matrix cells). The other 20 are Z-drop `med` with match < 0, where C reads uninitialized memory (HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#21, HPCBio/wfa2lib-rs#23 |
@@ -47,10 +47,10 @@ Checked with `tests/differential/run.sh` (1262 cases against the C commit in
 
 C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 
-- [x] 6565731 / 7ea485e (smarco/WFA2-lib#125): band inherited into BiWFA sub-aligners, and
+- [x] 6565731 / 7ea485e (Marco-Sola-Lab/WFA2-lib#125): band inherited into BiWFA sub-aligners, and
   compute limits clamped to `[min_k, max_k]`. This also changes unidirectional
   banded output (HPCBio/wfa2lib-rs#6, `3b16283` and the BiWFA commit).
-- [x] 90582eb (smarco/WFA2-lib#126): ends-free begin seeding only for ends-free span. Implemented this way in HPCBio/wfa2lib-rs#9; the baseline's end-to-end widening was never ported
+- [x] 90582eb (Marco-Sola-Lab/WFA2-lib#126): ends-free begin seeding only for ends-free span. Implemented this way in HPCBio/wfa2lib-rs#9; the baseline's end-to-end widening was never ported
   (HPCBio/wfa2lib-rs#9).
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and
   C++-binding commits.
@@ -58,7 +58,7 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 ### Known issues kept for C parity
 
 - HPCBio/wfa2lib-rs#18: edit/indel ends-free with begin gaps can return an invalid CIGAR
-  (C regression from `380eb31b`; reported as smarco/WFA2-lib#142 with a
+  (C regression from `380eb31b`; reported as Marco-Sola-Lab/WFA2-lib#142 with a
   proposed fix). **Fixed in corrected mode** (`Compat::Corrected`; FIXED_BUGS 14b).
 - HPCBio/wfa2lib-rs#21: X-drop with `steps_between_cutoffs > 1` returns invalid
   CIGARs (C high-memory backtrace over pruned diagonals; C's `med` is valid).
@@ -79,7 +79,7 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   `align_benchmark`'s printed score differs only because it rescores the
   CIGAR globally, charging free end gaps. Rust follows the scalar order on
   every CPU; the harness builds C without `-march=native`.
-- smarco/WFA2-lib#102, HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38: ends-free
+- Marco-Sola-Lab/WFA2-lib#102, HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38: ends-free
   with match < 0 can be suboptimal (trailing-end miss, repeat-unit shift,
   all-gap alignment with whole-length free ends). This showed up in
   HPCBio/dada2-rs#51. Note that dada2-rs's "free leading end-gap not
@@ -97,7 +97,7 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - COMBINE-lab/wfa2lib-rs#6: bugs 1–2 (bounds check, `init_ends`). Open.
 - Queued: bugs 3–4 (HPCBio/wfa2lib-rs#12 + HPCBio/wfa2lib-rs#14), then the
   CLI changes and ends-free begin gaps.
-- smarco/WFA2-lib#142: edit/indel begin-gap invalid CIGAR. Reported.
+- Marco-Sola-Lab/WFA2-lib#142: edit/indel begin-gap invalid CIGAR. Reported.
 
 ## Log
 
@@ -112,7 +112,7 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
     bug 4 (HPCBio/wfa2lib-rs#14), all merged into the fork's `main`.
   - Added these tracking files.
 - **2026-10-13:** HPCBio/wfa2lib-rs#6 (banded-adaptive as in C,
-  smarco/WFA2-lib#125 band clamp and BiWFA band shift, BiWFA heuristics and
+  Marco-Sola-Lab/WFA2-lib#125 band clamp and BiWFA band shift, BiWFA heuristics and
   statuses, BiWFA score-only) and HPCBio/wfa2lib-rs#7 (BiWFA length fallback at
   the top level only). BiWFA × every heuristic is now byte-identical to C
   3282f83, and the stock `wfa.utest.sh` is 60/60.
@@ -143,7 +143,7 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - **2026-10-14:** HPCBio/wfa2lib-rs#32 per-aligner `Compat` setting
   (default `C`; `Corrected` fixes known C bugs, CLI `--no-c-compat`). Covers
   ends-free with match < 0 (HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38,
-  smarco/WFA2-lib#102), now optimal, and edit/indel begin-gap CIGARs
+  Marco-Sola-Lab/WFA2-lib#102), now optimal, and edit/indel begin-gap CIGARs
   (HPCBio/wfa2lib-rs#18). Checked against a DP oracle.
 - **2026-10-14:** corrected-mode speed (HPCBio/wfa2lib-rs#31): its extend
   kernel was the overhead (+26–28% instructions over C mode on `long.seq`,
