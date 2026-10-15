@@ -82,13 +82,15 @@ For broader parity checks, `tests/differential/run.sh` builds C's
 1300 configurations (metrics, spans, heuristics, memory modes); see
 [`tests/differential/README.md`](tests/differential/README.md).
 
-CI (`.github/workflows/ci.yml`) runs clippy, the tests, a library-only build,
+CI (`.github/workflows/ci.yml`) runs clippy, the tests (release, and debug
+with overflow checks and debug assertions), a library-only build,
 `wfa_utest.sh` and the differential harness on Linux (x86-64) and macOS
 (arm64) for every pull request and push to `main`. Running the harness on both
 checks that Rust's x86 and ARM SIMD paths give the same output. Linux also
-runs everything with `RUSTFLAGS="-C target-cpu=x86-64-v3"`, so the AVX2
-kernels are tested both when selected at run time and when enabled at compile
-time (as in `target-cpu=native` builds).
+runs the release tests and the harness with
+`RUSTFLAGS="-C target-cpu=x86-64-v3"`, so the AVX2 kernels are tested both
+when selected at run time and when enabled at compile time (as in
+`target-cpu=native` builds).
 
 ## Usage
 
