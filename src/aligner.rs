@@ -1035,6 +1035,16 @@ impl<const N: usize> WavefrontAligner<N> {
     /// optimal once the current score reaches its total.
     fn extend_endsfree_corrected(&mut self, score: i32) -> bool {
         let m_ptr = self.wf_components.get_m_ptr(score as usize);
+        let prune = matches!(
+            self.heuristic,
+            HeuristicStrategy::None | HeuristicStrategy::BandedStatic { .. }
+        );
+        if prune
+            && let Some(best) = self.endsfree_best
+            && best.total > score
+        {
+            self.endsfree_prune(score, best.total);
+        }
 
         if !m_ptr.is_null() {
             let wf = unsafe { &mut *m_ptr };
@@ -1066,6 +1076,9 @@ impl<const N: usize> WavefrontAligner<N> {
                         pos: WavefrontPos { score, k, offset },
                         bt,
                     });
+                    if prune && total > score {
+                        self.endsfree_prune(score, total);
+                    }
                 }
             }
         }
@@ -1080,8 +1093,12 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         let done = if m_ptr.is_null() {
-            // Null steps are counted by the compute steps (as in C).
-            self.num_null_steps > self.wf_components.max_score_scope as i32
+            // Null steps are counted by the compute steps (as in C). With a
+            // candidate the search is already bounded by its total, and null
+            // steps don't end it: pruning can empty every wavefront while
+            // begin-free seeds are still to come.
+            self.endsfree_best.is_none()
+                && self.num_null_steps > self.wf_components.max_score_scope as i32
         } else {
             !matches!(self.heuristic, HeuristicStrategy::None)
                 && self.apply_heuristic_cutoff(score, m_ptr)
@@ -1099,6 +1116,50 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         false
+    }
+
+    /// Corrected-mode pruning: drop the cells at `score` that can't complete
+    /// to a total below the candidate's `total`.
+    ///
+    /// From cell (v, h) on diagonal k, the bases left are `|P| - v` and
+    /// `|T| - h`, which differ by `k - k_end` (`k_end = |T| - |P|`) all along
+    /// the diagonal. Matches cost nothing, but each base of that difference
+    /// becomes a gap base (at least `-match`) or a free-end base (`-match`),
+    /// so any completion totals at least `score + (-match) * |k - k_end|`.
+    /// Diagonals where that exceeds `total` can't give a better end (ties are
+    /// kept), and neither can any cell computed only from them, so the
+    /// result doesn't change. The kept diagonals form a band around `k_end`
+    /// that narrows as the score grows.
+    ///
+    /// Only with no heuristic or `BandedStatic`: the other heuristics read
+    /// the wavefronts, so pruning could change what they cut.
+    fn endsfree_prune(&mut self, score: i32, total: i32) {
+        let radius = (total - score) / -self.penalties.match_;
+        let k_end = self.sequences.text_length - self.sequences.pattern_length;
+        let (lo, hi) = (k_end - radius, k_end + radius);
+        let score_idx = score as usize;
+        let getters: &[fn(&WavefrontComponents<N>, usize) -> *mut crate::wavefront::Wavefront] =
+            match self.penalties.distance_metric {
+                DistanceMetric::GapAffine => &[
+                    WavefrontComponents::get_m_ptr,
+                    WavefrontComponents::get_i1_ptr,
+                    WavefrontComponents::get_d1_ptr,
+                ],
+                DistanceMetric::GapAffine2p => &[
+                    WavefrontComponents::get_m_ptr,
+                    WavefrontComponents::get_i1_ptr,
+                    WavefrontComponents::get_d1_ptr,
+                    WavefrontComponents::get_i2_ptr,
+                    WavefrontComponents::get_d2_ptr,
+                ],
+                _ => &[WavefrontComponents::get_m_ptr],
+            };
+        for get_ptr in getters {
+            let ptr = get_ptr(&self.wf_components, score_idx);
+            if !ptr.is_null() {
+                unsafe { (*ptr).trim_nulled(lo, hi) };
+            }
+        }
     }
 
     /// Backtrace the CIGAR from M-wavefront cell (`k`, `offset`), starting at
