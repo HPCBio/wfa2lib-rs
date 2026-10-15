@@ -82,6 +82,12 @@ For broader parity checks, `tests/differential/run.sh` builds C's
 1300 configurations (metrics, spans, heuristics, memory modes); see
 [`tests/differential/README.md`](tests/differential/README.md).
 
+For performance, `bench/sweep.py` builds both tools (C also with
+`-march=native`), generates fixed datasets and compares time, instructions,
+memory and output across metrics, memory modes, spans and heuristics; it
+writes `target/bench-sweep/<host>/summary.md`. Run it on an idle machine
+(`--quick` for a short check). Results are tracked in HPCBio/wfa2lib-rs#31.
+
 CI (`.github/workflows/ci.yml`) runs clippy, the tests (release, and debug
 with overflow checks and debug assertions), a library-only build,
 `wfa_utest.sh` and the differential harness on Linux (x86-64) and macOS

@@ -47,7 +47,7 @@ tests/
   data/                        -- CLI test fixtures
   differential/                -- Rust-vs-C differential harness (run.sh,
                                   cases.sh, build_c.sh, C_COMMIT, known_diffs.tsv)
-bench/                         -- Rust-vs-C timing scripts
+bench/                         -- Rust-vs-C timing scripts (sweep.py: full matrix, HPCBio/wfa2lib-rs#31)
 .github/workflows/
   ci.yml                       -- CI: clippy, tests, wfa_utest.sh and the
                                   differential harness (Linux x86-64, also
