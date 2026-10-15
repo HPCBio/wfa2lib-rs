@@ -346,6 +346,16 @@ const PROBE_INTERVAL_COMPACT: i32 = 6000;
 const PATTERN_LENGTH_INIT: i32 = 1000;
 const TEXT_LENGTH_INIT: i32 = 1000;
 
+/// CIGAR buffer size for a `plen` × `tlen` alignment. As C, twice the
+/// sequence lengths (partial Z-drop backtraces can exceed `plen + tlen`
+/// before max-trimming), plus one slot: the backtraces write backwards and
+/// leave `begin_offset` one below the first op, which would underflow for
+/// an empty buffer (empty pattern and text, HPCBio/wfa2lib-rs#41) or a full one.
+#[inline]
+fn cigar_buffer_len(plen: i32, tlen: i32) -> usize {
+    (2 * (plen + tlen)) as usize + 1
+}
+
 /// True if a component slot holds no wavefront or one trimmed to empty
 /// (C's `wavefront->null`).
 #[inline(always)]
@@ -780,8 +790,7 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Resize CIGAR buffer if computing alignment
         if self.alignment_scope == AlignmentScope::ComputeAlignment {
-            let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
-            self.cigar.resize(max_ops);
+            self.cigar.resize(cigar_buffer_len(plen, tlen));
         }
 
         // Enable modular wavefront storage for score-only mode (like C reference).
@@ -2211,8 +2220,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let plen = pattern.len() as i32;
         let tlen = text.len() as i32;
 
-        let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
-        self.cigar.resize(max_ops);
+        self.cigar.resize(cigar_buffer_len(plen, tlen));
         self.status = AlignStatus::Ok;
 
         // Take sub-aligners out of self so we can borrow self.cigar/penalties separately.
@@ -2794,8 +2802,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let tlen = self.sequences.text_length;
 
         if self.alignment_scope == AlignmentScope::ComputeAlignment {
-            let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
-            self.cigar.resize(max_ops);
+            self.cigar.resize(cigar_buffer_len(plen, tlen));
         }
 
         self.wf_components.resize(plen, tlen, &self.penalties);
@@ -3471,6 +3478,40 @@ mod tests {
         for ((pattern, text), score) in BEGIN_FREE_PAIRS.iter().zip([0, 0, 1]) {
             edit.set_alignment_free_ends(5, 0, 3, 0);
             assert_eq!(edit.align_endsfree(pattern, text), score);
+        }
+    }
+
+    #[test]
+    fn test_empty_sequences_cigar() {
+        // HPCBio/wfa2lib-rs#41: a fresh aligner's CIGAR buffer was empty for
+        // empty pattern and text, and the high-memory backtraces underflowed
+        // `begin_offset` (a panic in debug builds).
+        let affine = WavefrontPenalties::new_affine(crate::penalties::AffinePenalties {
+            match_: 0,
+            mismatch: 4,
+            gap_opening: 6,
+            gap_extension: 2,
+        });
+        for pen in [WavefrontPenalties::new_edit(), affine] {
+            for mode in [MemoryMode::High, MemoryMode::Med, MemoryMode::Low] {
+                for endsfree in [false, true] {
+                    let mut a = WavefrontAligner::<3>::new(pen.clone());
+                    a.set_memory_mode(mode);
+                    a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+                    let score = if endsfree {
+                        a.set_alignment_free_ends(0, 0, 0, 0);
+                        a.align_endsfree(b"", b"")
+                    } else {
+                        a.align_end2end(b"", b"")
+                    };
+                    assert_eq!(score, 0, "{mode:?} endsfree={endsfree}");
+                    assert_eq!(a.status, AlignStatus::Completed);
+                    assert!(a.cigar().is_null());
+                }
+            }
+            let mut a = WavefrontAligner::<3>::new(pen.clone());
+            assert_eq!(a.align_biwfa(b"", b""), 0);
+            assert!(a.cigar().is_null());
         }
     }
 

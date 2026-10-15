@@ -453,3 +453,22 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   fix proposed upstream. Gap metrics are unaffected (identical in both modes).
 - **Tests:** `issue_18_edit_begin_gaps`, `edit_indel_random_against_oracle`
   (3000 cases vs the DP oracle, all memory modes).
+
+## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)
+
+- **Symptom:** a fresh aligner given an empty pattern and an empty text,
+  with a CIGAR in high memory, panicked in debug builds ("attempt to
+  subtract with overflow", `backtrace.rs`). Release builds wrapped and
+  happened to return the right result (score 0, empty CIGAR). CI runs the
+  tests in release, so it never showed.
+- **Root cause:** the CIGAR buffer is `2 * (|P| + |T|)` ops, as in C, and the
+  backtraces write backwards, leaving `begin_offset` one below the first
+  op. C's offsets are `int`, so -1 is harmless there. In Rust they are
+  `usize`, and `max_ops - 1` underflows when the buffer is empty (it only
+  grows, so only a fresh aligner hit this).
+- **Fix:** `cigar_buffer_len` sizes the buffer with one extra slot, at all
+  three sites, which also covers a completely full buffer.
+- **Test:** `aligner::tests::test_empty_sequences_cigar` (edit and affine,
+  high/med/low, end-to-end and ends-free, BiWFA); fails without the fix.
+  The whole suite now also passes in debug.
+
