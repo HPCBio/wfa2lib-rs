@@ -22,10 +22,12 @@ On the node, run with --offline. Builds happen on the node: Rust and the
 native C build target the CPU they're built on, so they live in per-host
 directories and are never reused from another machine (a login node).
 
-Results go to target/bench-sweep/<host>/: results.tsv (one row per tool
-and case) and summary.md (ratios vs C, machine info). Single-threaded:
-run it on an otherwise idle machine (or an exclusive node) for stable
-times. Needs Python 3.6+, cargo, make and a C compiler.
+Results go to target/bench-sweep/<host>-<commit>[-dirty][-quick]/ (or
+--out): results.tsv (one row per tool and case) and summary.md (ratios vs
+C, machine info), so runs of different commits on one host don't
+overwrite each other. Single-threaded: run it on an otherwise idle
+machine (or an exclusive node) for stable times. Needs Python 3.6+,
+cargo, make and a C compiler.
 """
 
 import argparse
@@ -156,6 +158,19 @@ def generate(path, pairs, length, err, indels, flank, seed):
             f.write(">" + "".join(p) + "\n<" + "".join(t) + "\n")
 
 
+def git_rev():
+    """Short commit of this checkout, with "-dirty" if tracked files are
+    modified (untracked files don't count), or "unknown"."""
+    try:
+        rev = subprocess.check_output(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
+                                      stderr=subprocess.DEVNULL).decode().strip()
+        dirty = subprocess.check_output(["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"],
+                                        stderr=subprocess.DEVNULL).decode().strip()
+        return rev + ("-dirty" if dirty else "")
+    except Exception:
+        return "unknown"
+
+
 def machine_info():
     info = ["host: %s" % socket.gethostname(), "os: %s %s" % (platform.system(), platform.release())]
     cpu = platform.processor() or platform.machine()
@@ -177,10 +192,7 @@ def machine_info():
             info.append("%s: %s" % (cmd[0], subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().splitlines()[0]))
         except Exception:
             pass
-    try:
-        info.append("rust commit: %s" % subprocess.check_output(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"]).decode().strip())
-    except Exception:
-        pass
+    info.append("rust commit: %s" % git_rev())
     info.append("load at start: %s" % " ".join("%.2f" % x for x in os.getloadavg()))
     return info
 
@@ -295,14 +307,18 @@ def main():
     ap.add_argument("--filter", default=None, help="only cases whose name matches this regex")
     ap.add_argument("--pin", type=int, default=None, help="Linux: pin runs to this CPU (taskset)")
     ap.add_argument("--no-c-native", action="store_true", help="skip the -march=native C build")
-    ap.add_argument("--no-build", action="store_true", help="use existing builds (from this host)")
+    ap.add_argument("--no-build", action="store_true", help="use existing builds (from this host); they may be from another "
+                         "commit than the one the results are labelled with")
     ap.add_argument("--offline", action="store_true",
                     help="no network: cargo --offline (run `cargo fetch` beforehand) and C from ./WFA2-lib")
     ap.add_argument("--out", default=None, help="output directory")
     a = ap.parse_args()
     reps = a.reps or (1 if a.quick else 3)
     host = host_name()
-    outdir = a.out or os.path.join(ROOT, "target", "bench-sweep", host + ("-quick" if a.quick else ""))
+    # Per host and commit, so runs of different commits (A/B) don't overwrite
+    # each other
+    outdir = a.out or os.path.join(ROOT, "target", "bench-sweep",
+                                   "%s-%s%s" % (host, git_rev(), "-quick" if a.quick else ""))
     datadir = os.path.join(ROOT, "target", "bench-sweep", "data" + ("-quick" if a.quick else ""))
     os.makedirs(outdir, exist_ok=True)
     os.makedirs(datadir, exist_ok=True)
