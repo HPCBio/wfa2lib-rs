@@ -52,9 +52,7 @@ impl Cells {
     }
 }
 
-/// `n` cells of an input wavefront starting at diagonal `k`. The kernels
-/// work on slices so the compiler knows outputs don't alias inputs and can
-/// vectorize (C gets the same with `PRAGMA_LOOP_VECTORIZE`).
+/// `n` cells of an input wavefront starting at diagonal `k`.
 struct In<'a> {
     off: &'a [WfOffset],
     pc: &'a [Pcigar],
@@ -104,6 +102,18 @@ fn push(pcigar: Pcigar, op: Pcigar) -> Pcigar {
 fn sel<T>(c: bool, a: T, b: T) -> T {
     if c { a } else { b }
 }
+/// All ones if `c`, else zero.
+#[inline(always)]
+fn mask(c: bool) -> u32 {
+    (c as u32).wrapping_neg()
+}
+/// `a` where `m` is all ones, else `b`. Both values are loaded before the
+/// choice: a plain `if` over two loads lets LLVM load from a selected
+/// address instead, which is a gather and stops vectorization.
+#[inline(always)]
+fn blend(m: u32, a: u32, b: u32) -> u32 {
+    (a & m) | (b & !m)
+}
 const DEL: Pcigar = PCIGAR_DELETION as Pcigar;
 const MISMS: Pcigar = PCIGAR_MISMATCH as Pcigar;
 const INS: Pcigar = PCIGAR_INSERTION as Pcigar;
@@ -121,6 +131,38 @@ fn bound(k: i32, offset: WfOffset, plen: i32, tlen: i32) -> WfOffset {
 fn len(lo: i32, hi: i32) -> usize {
     (hi - lo + 1).max(0) as usize
 }
+
+/// Reslice to `n` cells, so the kernel loops have no bounds checks.
+macro_rules! cut {
+    ($n:expr; $($s:ident),+) => { $(let $s = &$s[..$n];)+ };
+}
+macro_rules! cut_mut {
+    ($n:expr; $($s:ident),+) => { $(let $s = &mut $s[..$n];)+ };
+}
+
+/// One gap cell (C's I or D update): from the M-open input or the
+/// extension input, the extension winning ties.
+#[inline(always)]
+fn gap(
+    open: WfOffset,
+    open_pc: Pcigar,
+    open_pv: BtBlockIdx,
+    ext: WfOffset,
+    ext_pc: Pcigar,
+    ext_pv: BtBlockIdx,
+) -> (WfOffset, Pcigar, BtBlockIdx) {
+    let m = mask(ext >= open);
+    (
+        blend(m, ext as u32, open as u32) as WfOffset,
+        blend(m, ext_pc, open_pc),
+        blend(m, ext_pv, open_pv),
+    )
+}
+
+// The kernels below take every array as a separate slice parameter, so the
+// compiler knows outputs don't alias inputs and vectorizes them (C gets the
+// same with `PRAGMA_LOOP_VECTORIZE`). They are not inlined into their
+// callers, which would lose that.
 
 /// Edit distance (C's `wavefront_compute_edit_idm_piggyback`).
 ///
@@ -142,23 +184,45 @@ pub unsafe fn compute_edit_idm(
         In::at(prev, lo + 1, n),
     );
     let o = Out::at(curr, lo, n);
+    edit_kernel(
+        lo, plen, tlen, pi.off, pi.pc, pi.pv, px.off, px.pc, px.pv, pd.off, pd.pc, pd.pv, o.off,
+        o.pc, o.pv,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn edit_kernel(
+    lo: i32,
+    plen: i32,
+    tlen: i32,
+    i_off: &[WfOffset],
+    i_pc: &[Pcigar],
+    i_pv: &[BtBlockIdx],
+    x_off: &[WfOffset],
+    x_pc: &[Pcigar],
+    x_pv: &[BtBlockIdx],
+    d_off: &[WfOffset],
+    d_pc: &[Pcigar],
+    d_pv: &[BtBlockIdx],
+    o_off: &mut [WfOffset],
+    o_pc: &mut [Pcigar],
+    o_pv: &mut [BtBlockIdx],
+) {
+    let n = o_off.len();
+    cut!(n; i_off, i_pc, i_pv, x_off, x_pc, x_pv, d_off, d_pc, d_pv);
+    cut_mut!(n; o_pc, o_pv);
     for i in 0..n {
-        let k = lo + i as i32;
-        let ins = pi.off[i] + 1;
-        let del = pd.off[i];
-        let misms = px.off[i] + 1;
+        let ins = i_off[i] + 1;
+        let del = d_off[i];
+        let misms = x_off[i] + 1;
         let max = del.max(ins.max(misms));
         // Later checks win: ins, then del, then misms.
-        let (d, x) = (max == del, max == misms);
-        let pc = sel(
-            x,
-            push(px.pc[i], MISMS),
-            sel(d, push(pd.pc[i], DEL), push(pi.pc[i], INS)),
-        );
-        let pv = sel(x, px.pv[i], sel(d, pd.pv[i], pi.pv[i]));
-        o.off[i] = bound(k, max, plen, tlen);
-        o.pc[i] = pc;
-        o.pv[i] = pv;
+        let (d, x) = (mask(max == del), mask(max == misms));
+        let pc = blend(d, push(d_pc[i], DEL), push(i_pc[i], INS));
+        o_pc[i] = blend(x, push(x_pc[i], MISMS), pc);
+        o_pv[i] = blend(x, x_pv[i], blend(d, d_pv[i], i_pv[i]));
+        o_off[i] = bound(lo + i as i32, max, plen, tlen);
     }
 }
 
@@ -177,15 +241,38 @@ pub unsafe fn compute_indel_idm(
     let n = len(lo, hi);
     let (pi, pd) = (In::at(prev, lo - 1, n), In::at(prev, lo + 1, n));
     let o = Out::at(curr, lo, n);
+    indel_kernel(
+        lo, plen, tlen, pi.off, pi.pc, pi.pv, pd.off, pd.pc, pd.pv, o.off, o.pc, o.pv,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn indel_kernel(
+    lo: i32,
+    plen: i32,
+    tlen: i32,
+    i_off: &[WfOffset],
+    i_pc: &[Pcigar],
+    i_pv: &[BtBlockIdx],
+    d_off: &[WfOffset],
+    d_pc: &[Pcigar],
+    d_pv: &[BtBlockIdx],
+    o_off: &mut [WfOffset],
+    o_pc: &mut [Pcigar],
+    o_pv: &mut [BtBlockIdx],
+) {
+    let n = o_off.len();
+    cut!(n; i_off, i_pc, i_pv, d_off, d_pc, d_pv);
+    cut_mut!(n; o_pc, o_pv);
     for i in 0..n {
-        let k = lo + i as i32;
-        let ins = pi.off[i] + 1;
-        let del = pd.off[i];
+        let ins = i_off[i] + 1;
+        let del = d_off[i];
         let max = del.max(ins);
-        let d = max == del;
-        o.off[i] = bound(k, max, plen, tlen);
-        o.pc[i] = sel(d, push(pd.pc[i], DEL), push(pi.pc[i], INS));
-        o.pv[i] = sel(d, pd.pv[i], pi.pv[i]);
+        let d = mask(max == del);
+        o_pc[i] = blend(d, push(d_pc[i], DEL), push(i_pc[i], INS));
+        o_pv[i] = blend(d, d_pv[i], i_pv[i]);
+        o_off[i] = bound(lo + i as i32, max, plen, tlen);
     }
 }
 
@@ -207,141 +294,15 @@ pub unsafe fn compute_linear_idm(
     let mx = In::at(m_misms, lo, n);
     let (oi, od) = (In::at(m_open, lo - 1, n), In::at(m_open, lo + 1, n));
     let o = Out::at(m_curr, lo, n);
-    for i in 0..n {
-        let k = lo + i as i32;
-        let ins = oi.off[i] + 1;
-        let del = od.off[i];
-        let misms = mx.off[i] + 1;
-        let max = del.max(misms.max(ins));
-        let (d, x) = (max == del, max == misms);
-        let pc = sel(
-            x,
-            push(mx.pc[i], MISMS),
-            sel(d, push(od.pc[i], DEL), push(oi.pc[i], INS)),
-        );
-        let pv = sel(x, mx.pv[i], sel(d, od.pv[i], oi.pv[i]));
-        o.off[i] = bound(k, max, plen, tlen);
-        o.pc[i] = pc;
-        o.pv[i] = pv;
-    }
-}
-
-/// One gap component (C's I or D update): from the M-open input or the
-/// extension input (extension wins ties), plus `inc` (1 for I, 0 for D),
-/// pushing `op`. All slices are cells `[lo, hi]` of their component, taken
-/// at the right diagonal shift. Slices as parameters tell the compiler
-/// outputs don't alias inputs, so this vectorizes.
-#[allow(clippy::too_many_arguments)]
-#[inline(never)]
-fn gap_pass(
-    open_off: &[WfOffset],
-    open_pc: &[Pcigar],
-    open_pv: &[BtBlockIdx],
-    ext_off: &[WfOffset],
-    ext_pc: &[Pcigar],
-    ext_pv: &[BtBlockIdx],
-    out_off: &mut [WfOffset],
-    out_pc: &mut [Pcigar],
-    out_pv: &mut [BtBlockIdx],
-    inc: WfOffset,
-    op: Pcigar,
-) {
-    let n = out_off.len();
-    let (open_off, open_pc, open_pv) = (&open_off[..n], &open_pc[..n], &open_pv[..n]);
-    let (ext_off, ext_pc, ext_pv) = (&ext_off[..n], &ext_pc[..n], &ext_pv[..n]);
-    let (out_pc, out_pv) = (&mut out_pc[..n], &mut out_pv[..n]);
-    for i in 0..n {
-        let x = ext_off[i] >= open_off[i];
-        out_off[i] = sel(x, ext_off[i], open_off[i]) + inc;
-        out_pc[i] = push(sel(x, ext_pc[i], open_pc[i]), op);
-        out_pv[i] = sel(x, ext_pv[i], open_pv[i]);
-    }
-}
-
-/// Fold a gap component into the M candidate (C's `if (max == ins/del)`):
-/// where it equals `max`, it wins over earlier candidates.
-#[inline(never)]
-fn m_fold(
-    max: &[WfOffset],
-    g_off: &[WfOffset],
-    g_pc: &[Pcigar],
-    g_pv: &[BtBlockIdx],
-    pc: &mut [Pcigar],
-    pv: &mut [BtBlockIdx],
-) {
-    let n = max.len();
-    let (g_off, g_pc, g_pv) = (&g_off[..n], &g_pc[..n], &g_pv[..n]);
-    let (pc, pv) = (&mut pc[..n], &mut pv[..n]);
-    for i in 0..n {
-        let c = max[i] == g_off[i];
-        pc[i] = sel(c, g_pc[i], pc[i]);
-        pv[i] = sel(c, g_pv[i], pv[i]);
-    }
-}
-
-/// M = max(misms, gaps...) with C's tie order (gaps in order, then misms
-/// last), the X push and the out-of-bounds NULL. `max` holds the max over
-/// the gap components on entry; `pc`/`pv` the winning gap's backtrace.
-#[allow(clippy::too_many_arguments)]
-#[inline(never)]
-fn m_finish(
-    lo: i32,
-    plen: i32,
-    tlen: i32,
-    mx_off: &[WfOffset],
-    mx_pc: &[Pcigar],
-    mx_pv: &[BtBlockIdx],
-    max: &mut [WfOffset],
-    pc: &mut [Pcigar],
-    pv: &mut [BtBlockIdx],
-) {
-    let n = max.len();
-    let (mx_off, mx_pc, mx_pv) = (&mx_off[..n], &mx_pc[..n], &mx_pv[..n]);
-    let (pc, pv) = (&mut pc[..n], &mut pv[..n]);
-    for i in 0..n {
-        let misms = mx_off[i] + 1;
-        let m = misms.max(max[i]);
-        let x = m == misms;
-        // From I/D the X is a fake gap-close; from M it is a real mismatch.
-        pc[i] = push(sel(x, mx_pc[i], pc[i]), MISMS);
-        pv[i] = sel(x, mx_pv[i], pv[i]);
-        max[i] = bound(lo + i as i32, m, plen, tlen);
-    }
-}
-
-/// Elementwise max of gap offsets into `max`.
-#[inline(never)]
-fn max_into(max: &mut [WfOffset], g: &[WfOffset]) {
-    let n = max.len();
-    let g = &g[..n];
-    for i in 0..n {
-        max[i] = max[i].max(g[i]);
-    }
-}
-
-/// Run a gap pass from inputs `open`/`ext` (at diagonal `k_in`) into `out`.
-#[allow(clippy::too_many_arguments)]
-#[inline(always)]
-unsafe fn gap_into(
-    open: &Wavefront,
-    ext: &Wavefront,
-    k_in: i32,
-    out: &mut Wavefront,
-    lo: i32,
-    n: usize,
-    inc: WfOffset,
-    op: Pcigar,
-) {
-    let (o, e) = (In::at(open, k_in, n), In::at(ext, k_in, n));
-    let w = Out::at(out, lo, n);
-    gap_pass(
-        o.off, o.pc, o.pv, e.off, e.pc, e.pv, w.off, w.pc, w.pv, inc, op,
+    // Same cell update as edit, with misms and the gaps from their inputs
+    edit_kernel(
+        lo, plen, tlen, oi.off, oi.pc, oi.pv, mx.off, mx.pc, mx.pv, od.off, od.pc, od.pv, o.off,
+        o.pc, o.pv,
     );
 }
 
-/// Gap-affine (C's `wavefront_compute_affine_idm_piggyback`), computed as
-/// separate I, D and M passes over the cells (same result as C's fused loop,
-/// whose M update only reads this cell's I/D).
+/// Gap-affine (C's `wavefront_compute_affine_idm_piggyback`): I1, D1 and M
+/// in one pass, as C's fused loop.
 ///
 /// # Safety
 /// As [`compute_linear_idm`].
@@ -360,22 +321,79 @@ pub unsafe fn compute_affine_idm(
     hi: i32,
 ) {
     let n = len(lo, hi);
-    gap_into(m_open, i1_ext, lo - 1, i1_curr, lo, n, 1, INS);
-    gap_into(m_open, d1_ext, lo + 1, d1_curr, lo, n, 0, DEL);
-    let (i1, d1) = (In::at(i1_curr, lo, n), In::at(d1_curr, lo, n));
-    let m = Out::at(m_curr, lo, n);
-    // M candidates in C's order: I1, then D1 (later wins ties), then misms.
-    m.off.copy_from_slice(i1.off);
-    m.pc.copy_from_slice(i1.pc);
-    m.pv.copy_from_slice(i1.pv);
-    max_into(m.off, d1.off);
-    m_fold(m.off, d1.off, d1.pc, d1.pv, m.pc, m.pv);
     let mx = In::at(m_misms, lo, n);
-    m_finish(lo, plen, tlen, mx.off, mx.pc, mx.pv, m.off, m.pc, m.pv);
+    let (io, ie) = (In::at(m_open, lo - 1, n), In::at(i1_ext, lo - 1, n));
+    let (dop, de) = (In::at(m_open, lo + 1, n), In::at(d1_ext, lo + 1, n));
+    let (m, i1, d1) = (
+        Out::at(m_curr, lo, n),
+        Out::at(i1_curr, lo, n),
+        Out::at(d1_curr, lo, n),
+    );
+    affine_kernel(
+        lo, plen, tlen, mx.off, mx.pc, mx.pv, io.off, io.pc, io.pv, ie.off, ie.pc, ie.pv, dop.off,
+        dop.pc, dop.pv, de.off, de.pc, de.pv, m.off, m.pc, m.pv, i1.off, i1.pc, i1.pv, d1.off,
+        d1.pc, d1.pv,
+    );
 }
 
-/// Gap-affine 2-piece (C's `wavefront_compute_affine2p_idm_piggyback`), as
-/// separate passes like [`compute_affine_idm`].
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn affine_kernel(
+    lo: i32,
+    plen: i32,
+    tlen: i32,
+    mx_off: &[WfOffset],
+    mx_pc: &[Pcigar],
+    mx_pv: &[BtBlockIdx],
+    io_off: &[WfOffset],
+    io_pc: &[Pcigar],
+    io_pv: &[BtBlockIdx],
+    ie_off: &[WfOffset],
+    ie_pc: &[Pcigar],
+    ie_pv: &[BtBlockIdx],
+    do_off: &[WfOffset],
+    do_pc: &[Pcigar],
+    do_pv: &[BtBlockIdx],
+    de_off: &[WfOffset],
+    de_pc: &[Pcigar],
+    de_pv: &[BtBlockIdx],
+    m_off: &mut [WfOffset],
+    m_pc: &mut [Pcigar],
+    m_pv: &mut [BtBlockIdx],
+    i_off: &mut [WfOffset],
+    i_pc: &mut [Pcigar],
+    i_pv: &mut [BtBlockIdx],
+    d_off: &mut [WfOffset],
+    d_pc: &mut [Pcigar],
+    d_pv: &mut [BtBlockIdx],
+) {
+    let n = m_off.len();
+    cut!(n; mx_off, mx_pc, mx_pv, io_off, io_pc, io_pv, ie_off, ie_pc, ie_pv);
+    cut!(n; do_off, do_pc, do_pv, de_off, de_pc, de_pv);
+    cut_mut!(n; m_pc, m_pv, i_off, i_pc, i_pv, d_off, d_pc, d_pv);
+    for i in 0..n {
+        let (ins, ins_pc, ins_pv) =
+            gap(io_off[i], io_pc[i], io_pv[i], ie_off[i], ie_pc[i], ie_pv[i]);
+        let (ins, ins_pc) = (ins + 1, push(ins_pc, INS));
+        let (del, del_pc, del_pv) =
+            gap(do_off[i], do_pc[i], do_pv[i], de_off[i], de_pc[i], de_pv[i]);
+        let del_pc = push(del_pc, DEL);
+        (i_off[i], i_pc[i], i_pv[i]) = (ins, ins_pc, ins_pv);
+        (d_off[i], d_pc[i], d_pv[i]) = (del, del_pc, del_pv);
+        // M: I1, then D1 (later wins ties), then misms. From I/D the X is a
+        // fake gap-close; from M it is a real mismatch.
+        let misms = mx_off[i] + 1;
+        let max = del.max(misms.max(ins));
+        let (d, x) = (mask(max == del), mask(max == misms));
+        let pc = blend(d, del_pc, ins_pc);
+        m_pc[i] = push(blend(x, mx_pc[i], pc), MISMS);
+        m_pv[i] = blend(x, mx_pv[i], blend(d, del_pv, ins_pv));
+        m_off[i] = bound(lo + i as i32, max, plen, tlen);
+    }
+}
+
+/// Gap-affine 2-piece (C's `wavefront_compute_affine2p_idm_piggyback`): I1,
+/// I2, D1, D2 and M in one pass, as C's fused loop.
 ///
 /// # Safety
 /// As [`compute_linear_idm`].
@@ -399,31 +417,114 @@ pub unsafe fn compute_affine2p_idm(
     hi: i32,
 ) {
     let n = len(lo, hi);
-    gap_into(m_open1, i1_ext, lo - 1, i1_curr, lo, n, 1, INS);
-    gap_into(m_open2, i2_ext, lo - 1, i2_curr, lo, n, 1, INS);
-    gap_into(m_open1, d1_ext, lo + 1, d1_curr, lo, n, 0, DEL);
-    gap_into(m_open2, d2_ext, lo + 1, d2_curr, lo, n, 0, DEL);
-    let m = Out::at(m_curr, lo, n);
-    // Max over all gaps first; then C's tie order I1, I2, D1, D2 (later
-    // wins), then misms.
-    let i1 = In::at(i1_curr, lo, n);
-    m.off.copy_from_slice(i1.off);
-    m.pc.copy_from_slice(i1.pc);
-    m.pv.copy_from_slice(i1.pv);
-    let gaps = [
-        In::at(i2_curr, lo, n),
-        In::at(d1_curr, lo, n),
-        In::at(d2_curr, lo, n),
-    ];
-    for g in &gaps {
-        max_into(m.off, g.off);
-    }
-    // `m.off` is now the max over gaps; I1 wins only where it equals it.
-    for g in &gaps {
-        m_fold(m.off, g.off, g.pc, g.pv, m.pc, m.pv);
-    }
     let mx = In::at(m_misms, lo, n);
-    m_finish(lo, plen, tlen, mx.off, mx.pc, mx.pv, m.off, m.pc, m.pv);
+    let (io1, ie1) = (In::at(m_open1, lo - 1, n), In::at(i1_ext, lo - 1, n));
+    let (io2, ie2) = (In::at(m_open2, lo - 1, n), In::at(i2_ext, lo - 1, n));
+    let (do1, de1) = (In::at(m_open1, lo + 1, n), In::at(d1_ext, lo + 1, n));
+    let (do2, de2) = (In::at(m_open2, lo + 1, n), In::at(d2_ext, lo + 1, n));
+    let m = Out::at(m_curr, lo, n);
+    let (i1, i2) = (Out::at(i1_curr, lo, n), Out::at(i2_curr, lo, n));
+    let (d1, d2) = (Out::at(d1_curr, lo, n), Out::at(d2_curr, lo, n));
+    affine2p_kernel(
+        lo, plen, tlen, mx.off, mx.pc, mx.pv, io1.off, io1.pc, io1.pv, ie1.off, ie1.pc, ie1.pv,
+        io2.off, io2.pc, io2.pv, ie2.off, ie2.pc, ie2.pv, do1.off, do1.pc, do1.pv, de1.off, de1.pc,
+        de1.pv, do2.off, do2.pc, do2.pv, de2.off, de2.pc, de2.pv, m.off, m.pc, m.pv, i1.off, i1.pc,
+        i1.pv, i2.off, i2.pc, i2.pv, d1.off, d1.pc, d1.pv, d2.off, d2.pc, d2.pv,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn affine2p_kernel(
+    lo: i32,
+    plen: i32,
+    tlen: i32,
+    mx_off: &[WfOffset],
+    mx_pc: &[Pcigar],
+    mx_pv: &[BtBlockIdx],
+    io1_off: &[WfOffset],
+    io1_pc: &[Pcigar],
+    io1_pv: &[BtBlockIdx],
+    ie1_off: &[WfOffset],
+    ie1_pc: &[Pcigar],
+    ie1_pv: &[BtBlockIdx],
+    io2_off: &[WfOffset],
+    io2_pc: &[Pcigar],
+    io2_pv: &[BtBlockIdx],
+    ie2_off: &[WfOffset],
+    ie2_pc: &[Pcigar],
+    ie2_pv: &[BtBlockIdx],
+    do1_off: &[WfOffset],
+    do1_pc: &[Pcigar],
+    do1_pv: &[BtBlockIdx],
+    de1_off: &[WfOffset],
+    de1_pc: &[Pcigar],
+    de1_pv: &[BtBlockIdx],
+    do2_off: &[WfOffset],
+    do2_pc: &[Pcigar],
+    do2_pv: &[BtBlockIdx],
+    de2_off: &[WfOffset],
+    de2_pc: &[Pcigar],
+    de2_pv: &[BtBlockIdx],
+    m_off: &mut [WfOffset],
+    m_pc: &mut [Pcigar],
+    m_pv: &mut [BtBlockIdx],
+    i1_off: &mut [WfOffset],
+    i1_pc: &mut [Pcigar],
+    i1_pv: &mut [BtBlockIdx],
+    i2_off: &mut [WfOffset],
+    i2_pc: &mut [Pcigar],
+    i2_pv: &mut [BtBlockIdx],
+    d1_off: &mut [WfOffset],
+    d1_pc: &mut [Pcigar],
+    d1_pv: &mut [BtBlockIdx],
+    d2_off: &mut [WfOffset],
+    d2_pc: &mut [Pcigar],
+    d2_pv: &mut [BtBlockIdx],
+) {
+    let n = m_off.len();
+    cut!(n; mx_off, mx_pc, mx_pv, io1_off, io1_pc, io1_pv, ie1_off, ie1_pc, ie1_pv);
+    cut!(n; io2_off, io2_pc, io2_pv, ie2_off, ie2_pc, ie2_pv);
+    cut!(n; do1_off, do1_pc, do1_pv, de1_off, de1_pc, de1_pv);
+    cut!(n; do2_off, do2_pc, do2_pv, de2_off, de2_pc, de2_pv);
+    cut_mut!(n; m_pc, m_pv, i1_off, i1_pc, i1_pv, i2_off, i2_pc, i2_pv);
+    cut_mut!(n; d1_off, d1_pc, d1_pv, d2_off, d2_pc, d2_pv);
+    for i in 0..n {
+        let (ins1, ins1_pc, ins1_pv) = gap(
+            io1_off[i], io1_pc[i], io1_pv[i], ie1_off[i], ie1_pc[i], ie1_pv[i],
+        );
+        let (ins1, ins1_pc) = (ins1 + 1, push(ins1_pc, INS));
+        let (ins2, ins2_pc, ins2_pv) = gap(
+            io2_off[i], io2_pc[i], io2_pv[i], ie2_off[i], ie2_pc[i], ie2_pv[i],
+        );
+        let (ins2, ins2_pc) = (ins2 + 1, push(ins2_pc, INS));
+        let (del1, del1_pc, del1_pv) = gap(
+            do1_off[i], do1_pc[i], do1_pv[i], de1_off[i], de1_pc[i], de1_pv[i],
+        );
+        let del1_pc = push(del1_pc, DEL);
+        let (del2, del2_pc, del2_pv) = gap(
+            do2_off[i], do2_pc[i], do2_pv[i], de2_off[i], de2_pc[i], de2_pv[i],
+        );
+        let del2_pc = push(del2_pc, DEL);
+        (i1_off[i], i1_pc[i], i1_pv[i]) = (ins1, ins1_pc, ins1_pv);
+        (i2_off[i], i2_pc[i], i2_pv[i]) = (ins2, ins2_pc, ins2_pv);
+        (d1_off[i], d1_pc[i], d1_pv[i]) = (del1, del1_pc, del1_pv);
+        (d2_off[i], d2_pc[i], d2_pv[i]) = (del2, del2_pc, del2_pv);
+        // M: I1, I2, D1, D2 (later wins ties), then misms
+        let misms = mx_off[i] + 1;
+        let max = ins1.max(ins2).max(del1).max(del2).max(misms);
+        let (s2, t1, t2, x) = (
+            mask(max == ins2),
+            mask(max == del1),
+            mask(max == del2),
+            mask(max == misms),
+        );
+        let pc = blend(t2, del2_pc, blend(t1, del1_pc, blend(s2, ins2_pc, ins1_pc)));
+        let pv = blend(t2, del2_pv, blend(t1, del1_pv, blend(s2, ins2_pv, ins1_pv)));
+        m_pc[i] = push(blend(x, mx_pc[i], pc), MISMS);
+        m_pv[i] = blend(x, mx_pv[i], pv);
+        m_off[i] = bound(lo + i as i32, max, plen, tlen);
+    }
 }
 
 // --- Offloading (C's wavefront_backtrace_offload.c) ---
