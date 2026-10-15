@@ -152,4 +152,5 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   Null steps no longer end a corrected search while a candidate is pending
   (FIXED_BUGS 14c, with `BandedStatic`).
   Also HPCBio/wfa2lib-rs#41: empty pattern + text no longer panics in debug
-  (FIXED_BUGS 15).
+  (FIXED_BUGS 15). CI now also runs the tests in a debug build (Linux and
+  macOS), so overflows like it fail CI.
