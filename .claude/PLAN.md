@@ -2,7 +2,7 @@
 
 ## Context
 
-This project ports [WFA2-lib](https://github.com/smarco/WFA2-lib) — a C/C++ library for time/space-efficient sequence alignment using the Wavefront Alignment (WFA) algorithm — to idiomatic Rust. The goal is **output-identical**, **performance-competitive**, **feature-complete** Rust code with an ergonomic API. The C reference lives in `WFA2-lib/` and its test suite (`WFA2-lib/tests/wfa.utest.sh`) provides our correctness oracle.
+This project ports [WFA2-lib](https://github.com/Marco-Sola-Lab/WFA2-lib) — a C/C++ library for time/space-efficient sequence alignment using the Wavefront Alignment (WFA) algorithm — to idiomatic Rust. The goal is **output-identical**, **performance-competitive**, **feature-complete** Rust code with an ergonomic API. The C reference lives in `WFA2-lib/` and its test suite (`WFA2-lib/tests/wfa.utest.sh`) provides our correctness oracle.
 
 ---
 
@@ -258,15 +258,15 @@ banded path crashes.
    - [x] stream input and output (`0f1eed5`; max RSS 199 MB → 2.5–10.7 MB)
    - [x] document the `./WFA2-lib` checkout needed by the integration tests (`554bcba`, README)
 6. [x] HPCBio/wfa2lib-rs#5 X-drop / Z-drop: C heuristics, Z-drop partial alignments, ported C affine backtrace, null-step counting in compute (`a3a4c4f`, `763ed8a`, `f4eb349`)
-7. [x] HPCBio/wfa2lib-rs#6 BiWFA heuristics; banded-adaptive as in C; port smarco/WFA2-lib#125 (`19eac8b`, `3b16283`, BiWFA statuses/heuristics)
-8. [x] HPCBio/wfa2lib-rs#9 Ends-free begin-free gaps: `match == 0` initial M seeding over `[-P0, T0]` (`28cb857`) and the `match != 0` path, `wavefront_compute_endsfree_*` (`6a06d8f`); smarco/WFA2-lib#126 semantics
+7. [x] HPCBio/wfa2lib-rs#6 BiWFA heuristics; banded-adaptive as in C; port Marco-Sola-Lab/WFA2-lib#125 (`19eac8b`, `3b16283`, BiWFA statuses/heuristics)
+8. [x] HPCBio/wfa2lib-rs#9 Ends-free begin-free gaps: `match == 0` initial M seeding over `[-P0, T0]` (`28cb857`) and the `match != 0` path, `wavefront_compute_endsfree_*` (`6a06d8f`); Marco-Sola-Lab/WFA2-lib#126 semantics
 9. [x] HPCBio/wfa2lib-rs#7 BiWFA tie-breaking with match < 0 (length fallback at the top level only, as C)
 
 **Per-change validation:**
 - stock `wfa.utest.sh`;
 - the differential matrix, `tests/differential/run.sh` (no differences beyond
   `known_diffs.tsv`);
-- banded parity against C HEAD (smarco/WFA2-lib#125 is ported);
+- banded parity against C HEAD (Marco-Sola-Lab/WFA2-lib#125 is ported);
 - a debug build plus Guard Malloc (macOS) for memory-safety fixes;
 - a regression test that fails on the parent commit;
 - clippy `-D warnings`;

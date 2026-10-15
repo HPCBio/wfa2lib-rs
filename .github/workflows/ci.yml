@@ -46,7 +46,7 @@ jobs:
       # ./WFA2-lib, at the commit the harness targets.
       - name: Fetch C WFA2-lib
         run: |
-          git clone --quiet https://github.com/smarco/WFA2-lib WFA2-lib
+          git clone --quiet https://github.com/Marco-Sola-Lab/WFA2-lib WFA2-lib
           git -C WFA2-lib checkout --quiet "$(cat tests/differential/C_COMMIT)"
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -75,7 +75,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Fetch C WFA2-lib
         run: |
-          git clone --quiet https://github.com/smarco/WFA2-lib WFA2-lib
+          git clone --quiet https://github.com/Marco-Sola-Lab/WFA2-lib WFA2-lib
           git -C WFA2-lib checkout --quiet "$(cat tests/differential/C_COMMIT)"
       - name: Tests (debug)
         run: cargo test

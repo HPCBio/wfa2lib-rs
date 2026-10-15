@@ -61,7 +61,7 @@ pub enum MemoryMode {
 ///   score of an ends-free alignment depends on how many bases its free end
 ///   gaps skip, so that cell need not be the best. The result can be
 ///   suboptimal, from a trailing-end miss of a point or two
-///   (smarco/WFA2-lib#102) to a shift by a repeat unit (HPCBio/wfa2lib-rs#37)
+///   (Marco-Sola-Lab/WFA2-lib#102) to a shift by a repeat unit (HPCBio/wfa2lib-rs#37)
 ///   or the all-gap, no-overlap alignment when the free ends span whole
 ///   sequences (HPCBio/wfa2lib-rs#38). Corrected mode charges skipped
 ///   trailing bases like the begin-free ones and returns the optimal
@@ -73,7 +73,7 @@ pub enum MemoryMode {
 ///   It can take more steps than C (up to the optimal score).
 ///
 /// - **Edit/indel ends-free with begin gaps** (HPCBio/wfa2lib-rs#18, a C
-///   regression from `380eb31b`, reported as smarco/WFA2-lib#142): C can
+///   regression from `380eb31b`, reported as Marco-Sola-Lab/WFA2-lib#142): C can
 ///   return an invalid CIGAR (a mismatching column as `M`; the score is
 ///   right). Corrected mode marks the begin-free seeds as initialized, the
 ///   fix proposed upstream, so the backtrace can reach them.
@@ -529,7 +529,7 @@ impl<const N: usize> WavefrontAligner<N> {
     ///   <https://github.com/HPCBio/wfa2lib-rs/issues/18>. Fixed by
     ///   [`Compat::Corrected`].
     /// - **With a match reward** (`match < 0`), the chosen ends-free alignment
-    ///   can be suboptimal (<https://github.com/smarco/WFA2-lib/issues/102>):
+    ///   can be suboptimal (<https://github.com/Marco-Sola-Lab/WFA2-lib/issues/102>):
     ///   shifted by a repeat unit
     ///   (<https://github.com/HPCBio/wfa2lib-rs/issues/37>), or, when the free
     ///   ends span whole sequences, the all-gap alignment
@@ -906,7 +906,7 @@ impl<const N: usize> WavefrontAligner<N> {
                 (*wf_ptr).hi = t0;
                 // Corrected mode: the seeds are initialized too, so the
                 // edit/indel backtrace can step onto them (HPCBio/wfa2lib-rs#18,
-                // the fix proposed in smarco/WFA2-lib#142).
+                // the fix proposed in Marco-Sola-Lab/WFA2-lib#142).
                 if self.compat == Compat::Corrected {
                     (*wf_ptr).wf_elements_init_min = -p0;
                     (*wf_ptr).wf_elements_init_max = t0;
@@ -2407,7 +2407,7 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Recursive BiWFA divide-and-conquer alignment (C's
     /// `wavefront_bialign_alignment`). `heuristic` is the top-level aligner's;
     /// sub-aligners inherit it with the band shifted to each sub-problem
-    /// (smarco/WFA2-lib#125). Returns the alignment score, or the status that
+    /// (Marco-Sola-Lab/WFA2-lib#125). Returns the alignment score, or the status that
     /// stopped it.
     #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
     fn bialign_recursive(
@@ -2897,7 +2897,7 @@ impl<const N: usize> WavefrontAligner<N> {
     }
 
     /// Clamp a computed diagonal range to the heuristic band, as C's
-    /// `wavefront_compute_limits_heuristic` (smarco/WFA2-lib#125) does for
+    /// `wavefront_compute_limits_heuristic` (Marco-Sola-Lab/WFA2-lib#125) does for
     /// banded-static and banded-adaptive in the linear/affine/affine2p steps.
     #[inline(always)]
     fn clamp_to_band(&self, lo: i32, hi: i32) -> (i32, i32) {
@@ -3428,7 +3428,7 @@ mod tests {
     fn test_banded_end_outside_band_is_unreachable() {
         // End diagonal k = 12 lies outside the [-10, 10] band. C WFA2-lib
         // 16969b5b still completed this pair (I/D wavefronts carried it past
-        // the band: 210 affine / 204 affine2p); since smarco/WFA2-lib#125
+        // the band: 210 affine / 204 affine2p); since Marco-Sola-Lab/WFA2-lib#125
         // clamps the computed range to the band, C (3282f83) reports it
         // unreachable, and so must we.
         let pattern = b"GCAAGACGATTAGACTTGATAAATGCAATCATCGACTGTAAACAGACGAGCTGTCCTGGGACACTACTGACCGGATCGACTACCGCGT";
@@ -4080,7 +4080,7 @@ mod tests {
     #[test]
     fn test_biwfa_band_excluding_end_is_unreachable() {
         // End diagonal k = -30 is outside the [-5, 5] band, which the
-        // sub-aligners now inherit (as C's smarco/WFA2-lib#125); previously
+        // sub-aligners now inherit (as C's Marco-Sola-Lab/WFA2-lib#125); previously
         // BiWFA ignored the heuristic and completed.
         let (pattern, _) = biwfa_test_pair();
         let text = &pattern[..270];
