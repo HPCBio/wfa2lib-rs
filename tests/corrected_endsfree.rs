@@ -3,6 +3,7 @@
 //! dynamic-programming oracle.
 
 use wfa2lib_rs::aligner::{AlignmentScope, Compat, MemoryMode, WavefrontAligner};
+use wfa2lib_rs::heuristic::HeuristicStrategy;
 use wfa2lib_rs::penalties::{
     Affine2pPenalties, AffinePenalties, LinearPenalties, WavefrontPenalties,
 };
@@ -401,6 +402,101 @@ fn random_against_oracle() {
             ),
         };
         check(kind, &p, &pat, &txt, ends);
+    }
+}
+
+/// Longer pairs (a shared core with edits, random flanks, unequal lengths),
+/// where the first end found is far from optimal and the pruning of
+/// diagonals that can't beat it trims most of each wavefront.
+#[test]
+fn random_long_against_oracle() {
+    let mut rng = Lcg(7);
+    for iter in 0..300 {
+        let kind = rng.below(3) as usize;
+        let match_ = -1 - rng.below(4);
+        let p = match kind {
+            0 => Pen::linear(match_, 2 + rng.below(6), 1 + rng.below(6)),
+            1 => Pen::affine(match_, 2 + rng.below(6), rng.below(8), 1 + rng.below(4)),
+            _ => Pen {
+                match_,
+                mismatch: 2 + rng.below(6),
+                o1: 2,
+                e1: 4,
+                o2: 12,
+                e2: 1,
+            },
+        };
+        let core = rng.seq(b"ACGT", 120);
+        let mut pat = Vec::new();
+        for &c in &core {
+            match rng.below(20) {
+                0 => {}
+                1 => pat.push(b"ACGT"[rng.below(4) as usize]),
+                2 => pat.extend([c, b"ACGT"[rng.below(4) as usize]]),
+                _ => pat.push(c),
+            }
+        }
+        let mut txt = core;
+        // Random flanks, each present half the time
+        for s in [&mut pat, &mut txt] {
+            if rng.below(2) == 0 {
+                let f = rng.seq(b"ACGT", 40);
+                s.splice(0..0, f);
+            }
+            if rng.below(2) == 0 {
+                let f = rng.seq(b"ACGT", 40);
+                s.extend(f);
+            }
+        }
+        let (n, m) = (pat.len() as i32, txt.len() as i32);
+        let ends = match iter % 3 {
+            0 => (n, n, m, m),
+            1 => (0, n, 0, m), // extension-like
+            _ => (
+                rng.below(n as u64 + 1),
+                rng.below(n as u64 + 1),
+                rng.below(m as u64 + 1),
+                rng.below(m as u64 + 1),
+            ),
+        };
+        check(kind, &p, &pat, &txt, ends);
+    }
+}
+
+/// Corrected mode with `BandedStatic` where the end diagonal lies outside
+/// the band: the band and the pruning empty every wavefront long before the
+/// optimum, a begin-free seed outside the band at score 754, is reached.
+/// Null steps must not end the search while a candidate is pending (they
+/// did, returning a worse end).
+#[test]
+fn banded_static_pending_seeds() {
+    let data = std::fs::read_to_string("tests/data/corrected_banded_seeds.seq").unwrap();
+    let mut lines = data.lines();
+    let pat = lines.next().unwrap().trim_start_matches('>').as_bytes();
+    let txt = lines.next().unwrap().trim_start_matches('<').as_bytes();
+    let p = Pen::linear(-2, 4, 3);
+    let (n, m) = (pat.len() as i32, txt.len() as i32);
+    let ends = (n, n, m, m);
+    let want = oracle(&p, pat, txt, ends);
+    let wp = penalties(&p, 0);
+    for memory in [MemoryMode::High, MemoryMode::Med, MemoryMode::Low] {
+        let mut a = WavefrontAligner::<1>::new(wp.clone());
+        a.set_compat(Compat::Corrected);
+        a.set_memory_mode(memory);
+        a.set_heuristic(HeuristicStrategy::BandedStatic {
+            min_k: -10,
+            max_k: 200,
+        });
+        a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+        a.set_alignment_free_ends(ends.0, ends.1, ends.2, ends.3);
+        a.align_endsfree(pat, txt);
+        let c = a.cigar();
+        c.check_alignment(pat, txt).unwrap();
+        assert_eq!(
+            cigar_penalty(&p, c.operations_slice(), ends),
+            want,
+            "{memory:?}"
+        );
     }
 }
 

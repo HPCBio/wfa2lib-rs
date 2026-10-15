@@ -405,7 +405,18 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   real score. With match == 0 the output is unchanged (the totals equal the
   scores).
 - **Cost:** it runs on until the optimal total, not just the first boundary
-  hit. Measured in `PERFORMANCE_LOG.md`.
+  hit. Pruning keeps that cheap: from cell (v, h) any completion totals at
+  least `s + M * |k - k_end|` (`k_end = |T| - |P|`; the bases left differ by
+  `k - k_end` all along a diagonal, and each of them is a gap or free-end
+  base, at least M). Once there is a candidate, the cells at each score are
+  trimmed to the diagonals that could still beat it (ties kept) and the
+  dropped cells nulled, so no later step reads them. The result is
+  unchanged. Only with no heuristic or `BandedStatic`, since the other
+  heuristics read the wavefronts. The extend kernel checks C's cheap
+  termination test first and counts the bases left only at an end. With
+  both, corrected mode is +2–2.5% instructions over C mode when the first
+  end found is near-optimal; when it isn't, the extra search is what fixes
+  the result. Measured in `PERFORMANCE_LOG.md`.
 - **Tests:** `tests/corrected_endsfree.rs`: the #37/#38 reproducers, and
   3000 random cases (linear/affine/affine2p, small alphabets and repeats,
   whole-length, extension-like and random free ends). Each is checked
@@ -413,6 +424,24 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   high/med/low. Also: match == 0 identical to C mode; a pending candidate
   survives forced compaction in med/low; #38's pair B (16S, 1.4 kb).
   240k further random cases (up to 40 bp) passed during development.
+  `random_long_against_oracle`: 300 longer pairs (to ~200 bp, with flanks)
+  where pruning trims most cells; a band one diagonal narrower fails it.
+
+### 14c. Corrected mode: null steps ended the search with a candidate pending
+
+- **Symptom:** corrected mode with `BandedStatic` could return a worse end
+  than the optimum within the band (e.g. SW 1 instead of 2) when the end
+  diagonal lies outside the band.
+- **Root cause:** the band (and, with pruning, the pruning band) can empty
+  every wavefront well before the candidate's total. Ending on null steps,
+  as C does, stopped the search there, but begin-free seeds still to come
+  (one per `M` score, outside the band) can beat the candidate.
+- **Fix:** with a candidate, null steps don't end the search; it ends when
+  the score reaches the candidate's total, as before. Without a candidate,
+  unchanged. Found while checking the pruning (14a) for identical output.
+- **Test:** `banded_static_pending_seeds` (`tests/data/corrected_banded_seeds.seq`,
+  linear `-2,4,3`, whole-length free ends, band `-10,200`) vs the DP oracle,
+  high/med/low.
 
 ### 14b. Edit/indel ends-free with begin gaps: invalid CIGAR (HPCBio/wfa2lib-rs#18)
 
@@ -424,3 +453,22 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   fix proposed upstream. Gap metrics are unaffected (identical in both modes).
 - **Tests:** `issue_18_edit_begin_gaps`, `edit_indel_random_against_oracle`
   (3000 cases vs the DP oracle, all memory modes).
+
+## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)
+
+- **Symptom:** a fresh aligner given an empty pattern and an empty text,
+  with a CIGAR in high memory, panicked in debug builds ("attempt to
+  subtract with overflow", `backtrace.rs`). Release builds wrapped and
+  happened to return the right result (score 0, empty CIGAR). CI runs the
+  tests in release, so it never showed.
+- **Root cause:** the CIGAR buffer is `2 * (|P| + |T|)` ops, as in C, and the
+  backtraces write backwards, leaving `begin_offset` one below the first
+  op. C's offsets are `int`, so -1 is harmless there. In Rust they are
+  `usize`, and `max_ops - 1` underflows when the buffer is empty (it only
+  grows, so only a fresh aligner hit this).
+- **Fix:** `cigar_buffer_len` sizes the buffer with one extra slot, at all
+  three sites, which also covers a completely full buffer.
+- **Test:** `aligner::tests::test_empty_sequences_cigar` (edit and affine,
+  high/med/low, end-to-end and ends-free, BiWFA); fails without the fix.
+  The whole suite now also passes in debug.
+

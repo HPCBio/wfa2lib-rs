@@ -477,7 +477,11 @@ pub fn extend_matches_packed_endsfree_best(
     pattern_end_free: i32,
     text_end_free: i32,
 ) -> Option<(i32, WfOffset, i32)> {
+    let lo = wf.lo;
+    let hi = wf.hi;
     let ptrs = sequences.ptrs();
+    let pattern_base = ptrs.pattern;
+    let text_base = ptrs.text;
     let pattern_length = sequences.pattern_length;
     let text_length = sequences.text_length;
     let mut best: Option<(i32, WfOffset, i32)> = None;
@@ -485,24 +489,37 @@ pub fn extend_matches_packed_endsfree_best(
     // SAFETY: Same as extend_matches_packed_end2end.
     unsafe {
         let centered = wf.offsets_centered_mut_ptr();
-        for k in wf.lo..=wf.hi {
-            let off_ptr = centered.offset(k as isize);
-            if *off_ptr == OFFSET_NULL {
-                continue;
+        let mut off_ptr = centered.offset(lo as isize);
+        let off_end = centered.offset(hi as isize).add(1);
+        let mut k = lo;
+
+        while off_ptr < off_end {
+            let offset = *off_ptr;
+            if offset != OFFSET_NULL {
+                let offset = extend_scalar_one(pattern_base, text_base, k, offset);
+                *off_ptr = offset;
+                // Cheap check first: count the bases left only at an end
+                if termination::termination_endsfree(
+                    pattern_length,
+                    text_length,
+                    pattern_end_free,
+                    text_end_free,
+                    k,
+                    offset,
+                ) && let Some(left) = termination::endsfree_left(
+                    pattern_length,
+                    text_length,
+                    pattern_end_free,
+                    text_end_free,
+                    k,
+                    offset,
+                ) && best.is_none_or(|(_, _, l)| left < l)
+                {
+                    best = Some((k, offset, left));
+                }
             }
-            let offset = extend_scalar_one(ptrs.pattern, ptrs.text, k, *off_ptr);
-            *off_ptr = offset;
-            if let Some(left) = termination::endsfree_left(
-                pattern_length,
-                text_length,
-                pattern_end_free,
-                text_end_free,
-                k,
-                offset,
-            ) && best.is_none_or(|(_, _, l)| left < l)
-            {
-                best = Some((k, offset, left));
-            }
+            off_ptr = off_ptr.add(1);
+            k += 1;
         }
     }
 
@@ -647,7 +664,15 @@ pub fn extend_matches_custom_endsfree_best(
             *centered.offset(k as isize) = offset;
         }
 
-        if let Some(left) = termination::endsfree_left(
+        // Cheap check first: count the bases left only at an end
+        if termination::termination_endsfree(
+            pattern_length,
+            text_length,
+            pattern_end_free,
+            text_end_free,
+            k,
+            offset,
+        ) && let Some(left) = termination::endsfree_left(
             pattern_length,
             text_length,
             pattern_end_free,

@@ -145,3 +145,11 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   ends-free with match < 0 (HPCBio/wfa2lib-rs#37, HPCBio/wfa2lib-rs#38,
   smarco/WFA2-lib#102), now optimal, and edit/indel begin-gap CIGARs
   (HPCBio/wfa2lib-rs#18). Checked against a DP oracle.
+- **2026-10-14:** corrected-mode speed (HPCBio/wfa2lib-rs#31): its extend
+  kernel was the overhead (+26–28% instructions over C mode on `long.seq`,
+  now +2–2.5%). Also exact pruning: with an end candidate, wavefronts are
+  trimmed to the diagonals that could still beat it (output unchanged).
+  Null steps no longer end a corrected search while a candidate is pending
+  (FIXED_BUGS 14c, with `BandedStatic`).
+  Also HPCBio/wfa2lib-rs#41: empty pattern + text no longer panics in debug
+  (FIXED_BUGS 15).

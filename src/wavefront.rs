@@ -442,6 +442,39 @@ impl Wavefront {
         self.wf_elements_init_max = end;
     }
 
+    /// Narrow the limits to at most [`lo`, `hi`], setting the dropped cells to
+    /// OFFSET_NULL so that later steps reading past the new limits see them as
+    /// unreached (a plain limit change, as the heuristics make, leaves their
+    /// offsets readable). Marks the wavefront null if nothing is left.
+    pub(crate) fn trim_nulled(&mut self, lo: i32, hi: i32) {
+        if self.null || self.lo > self.hi || (lo <= self.lo && hi >= self.hi) {
+            return;
+        }
+        let (old_lo, old_hi) = (self.lo, self.hi);
+        let new_lo = lo.max(old_lo);
+        let new_hi = hi.min(old_hi);
+        let fill = |wf: &mut Self, from: i32, to: i32| {
+            if from <= to {
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        wf.centered_offsets.offset(from as isize),
+                        (to - from + 1) as usize,
+                    )
+                    .fill(OFFSET_NULL);
+                }
+            }
+        };
+        if new_lo > new_hi {
+            fill(self, old_lo, old_hi);
+            self.null = true;
+        } else {
+            fill(self, old_lo, new_lo - 1);
+            fill(self, new_hi + 1, old_hi);
+        }
+        self.lo = new_lo;
+        self.hi = new_hi;
+    }
+
     // --- K-centered accessors ---
 
     /// Get the offset at diagonal `k`.
@@ -635,6 +668,34 @@ impl Wavefront {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_trim_nulled() {
+        let mut wf = Wavefront::allocate(11, false);
+        wf.init(-5, 5);
+        wf.set_limits(-4, 4);
+        for k in -4..=4 {
+            wf.set_offset(k, 10 + k);
+        }
+        // Narrowing nulls the dropped cells and keeps the rest
+        wf.trim_nulled(-2, 3);
+        assert_eq!((wf.lo, wf.hi, wf.null), (-2, 3, false));
+        for k in -4..=4 {
+            let want = if (-2..=3).contains(&k) {
+                10 + k
+            } else {
+                OFFSET_NULL
+            };
+            assert_eq!(wf.get_offset(k), want, "k={k}");
+        }
+        // A wider range changes nothing
+        wf.trim_nulled(-9, 9);
+        assert_eq!((wf.lo, wf.hi), (-2, 3));
+        // No overlap empties it
+        wf.trim_nulled(6, 9);
+        assert!(wf.null);
+        assert!((-2..=3).all(|k| wf.get_offset(k) == OFFSET_NULL));
+    }
 
     #[test]
     fn test_struct_size() {

@@ -309,3 +309,47 @@ score-only, ms. "C" is the default mode, "corr." is `--no-c-compat`.
   Matches cost 0, and every base of the length difference is either a gap
   (> M) or a free-end base (M). Once a candidate exists, diagonals whose
   bound reaches its total can be trimmed, narrowing the wavefronts.
+
+
+## 2026-10-14: corrected-mode ends-free speed (HPCBio/wfa2lib-rs#31, #32)
+
+Branch `perf/corrected-endsfree-pruning` vs `main` `e1ced46`, Apple Silicon,
+`long.seq` (300 × 2 kb). The machine was loaded (an endpoint-backup service)
+for part of the work, so instructions retired (`/usr/bin/time -l`, load-
+independent) are the main measure; wall clock is best of 5, interleaved, at
+load ~3. CIGAR / score-only. "C" is the default mode, "corr." `--no-c-compat`.
+
+| Config | main C | main corr. | branch C | branch corr. |
+|---|---|---|---|---|
+| affine `-5,4,0,8`, ends-free 0.1 ×4 (G instr.) | 14.54 / 14.25 | 18.30 / 18.01 | 14.54 / 14.25 | 14.87 / 14.58 |
+| same (ms) | 1092 / 715 | 1451 / 1054 | 1103 / 717 | 1181 / 796 |
+| affine `-5,4,0,8`, ends-free 1 ×4 (G instr.) | 25.42 / 24.94 | 32.35 / 31.87 | 25.42 / 24.94 | 26.02 / 25.54 |
+| same (ms) | 1713 / 1230 | 2344 / 1856 | 1710 / 1237 | 1854 / 1382 |
+| affine `-5,4,0,8`, extension (G instr.) | 2.54 / 2.45 | 3.10 / 3.00 | 2.54 / 2.45 | 2.61 / 2.52 |
+| same (ms) | 145 / 119 | 198 / 169 | 145 / 120 | 159 / 130 |
+| affine2p `-1,6,2,4,12,1`, ends-free 0.1 ×4 (G instr.) | 17.79 / 17.33 | 21.78 / 21.33 | 17.81 / 17.34 | 18.15 / 17.70 |
+| same (ms) | 1444 / 1008 | 1814 / 1372 | 1451 / 1008 | 1533 / 1087 |
+| affine ends-free 0.1 ×4, banded-static ±200 (G instr.) | 11.63 / 11.33 | 14.46 / 14.17 | 11.62 / 11.32 | 11.88 / 11.59 |
+| same (ms) | 904 / 560 | 1160 / 816 | 880 / 561 | 956 / 613 |
+| affine `-5,4,0,8`, global (ms) | 128 / 105 | 127 / 106 | 128 / 105 | 129 / 105 |
+
+- Corrected-mode overhead over C mode: +26–28% instructions (+26–51% time)
+  → +2–2.5% instructions (+7–12% time). C mode unchanged.
+- Cause: not the extra steps. Corrected mode ran only 0.8% more steps than
+  C on `long.seq`, but its extend took 74% more samples (samply). The
+  `_best` extend kernel looped `for k in lo..=hi` and called
+  `termination::endsfree_left` (two `Option`s, merged) on every diagonal.
+  Now it walks the offsets as the C-mode kernel does and checks
+  `termination_endsfree` first, counting the bases left only at an end.
+- Pruning (FIXED_BUGS 14a): exact, but worth only 0.3–2% here, since the
+  first candidate is usually near-optimal on these pairs. On pairs with
+  random flanks and whole-length free ends (300 × 1–2 kb + up to 300 bp
+  flanks), corrected mode is still +15–55% instructions over C mode
+  (+160% on 500 short pairs with `-1,4,6,2`). There C stops at a wrong,
+  #38-style first hit, so the extra search is what makes the result
+  optimal; pruning trims 0.3–2% of it.
+- Output: pruned vs unpruned byte-identical on 360 configs × 506 generated
+  pairs and 240 configs × `long.seq` (linear/affine/affine2p, five spans,
+  high/med/low, CIGAR and score-only, no heuristic and two banded-static
+  bands), once both include the null-step fix (FIXED_BUGS 14c).
+

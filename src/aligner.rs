@@ -346,6 +346,16 @@ const PROBE_INTERVAL_COMPACT: i32 = 6000;
 const PATTERN_LENGTH_INIT: i32 = 1000;
 const TEXT_LENGTH_INIT: i32 = 1000;
 
+/// CIGAR buffer size for a `plen` × `tlen` alignment. As C, twice the
+/// sequence lengths (partial Z-drop backtraces can exceed `plen + tlen`
+/// before max-trimming), plus one slot: the backtraces write backwards and
+/// leave `begin_offset` one below the first op, which would underflow for
+/// an empty buffer (empty pattern and text, HPCBio/wfa2lib-rs#41) or a full one.
+#[inline]
+fn cigar_buffer_len(plen: i32, tlen: i32) -> usize {
+    (2 * (plen + tlen)) as usize + 1
+}
+
 /// True if a component slot holds no wavefront or one trimmed to empty
 /// (C's `wavefront->null`).
 #[inline(always)]
@@ -780,8 +790,7 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Resize CIGAR buffer if computing alignment
         if self.alignment_scope == AlignmentScope::ComputeAlignment {
-            let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
-            self.cigar.resize(max_ops);
+            self.cigar.resize(cigar_buffer_len(plen, tlen));
         }
 
         // Enable modular wavefront storage for score-only mode (like C reference).
@@ -1035,6 +1044,16 @@ impl<const N: usize> WavefrontAligner<N> {
     /// optimal once the current score reaches its total.
     fn extend_endsfree_corrected(&mut self, score: i32) -> bool {
         let m_ptr = self.wf_components.get_m_ptr(score as usize);
+        let prune = matches!(
+            self.heuristic,
+            HeuristicStrategy::None | HeuristicStrategy::BandedStatic { .. }
+        );
+        if prune
+            && let Some(best) = self.endsfree_best
+            && best.total > score
+        {
+            self.endsfree_prune(score, best.total);
+        }
 
         if !m_ptr.is_null() {
             let wf = unsafe { &mut *m_ptr };
@@ -1066,6 +1085,9 @@ impl<const N: usize> WavefrontAligner<N> {
                         pos: WavefrontPos { score, k, offset },
                         bt,
                     });
+                    if prune && total > score {
+                        self.endsfree_prune(score, total);
+                    }
                 }
             }
         }
@@ -1080,8 +1102,12 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         let done = if m_ptr.is_null() {
-            // Null steps are counted by the compute steps (as in C).
-            self.num_null_steps > self.wf_components.max_score_scope as i32
+            // Null steps are counted by the compute steps (as in C). With a
+            // candidate the search is already bounded by its total, and null
+            // steps don't end it: pruning can empty every wavefront while
+            // begin-free seeds are still to come.
+            self.endsfree_best.is_none()
+                && self.num_null_steps > self.wf_components.max_score_scope as i32
         } else {
             !matches!(self.heuristic, HeuristicStrategy::None)
                 && self.apply_heuristic_cutoff(score, m_ptr)
@@ -1099,6 +1125,50 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         false
+    }
+
+    /// Corrected-mode pruning: drop the cells at `score` that can't complete
+    /// to a total below the candidate's `total`.
+    ///
+    /// From cell (v, h) on diagonal k, the bases left are `|P| - v` and
+    /// `|T| - h`, which differ by `k - k_end` (`k_end = |T| - |P|`) all along
+    /// the diagonal. Matches cost nothing, but each base of that difference
+    /// becomes a gap base (at least `-match`) or a free-end base (`-match`),
+    /// so any completion totals at least `score + (-match) * |k - k_end|`.
+    /// Diagonals where that exceeds `total` can't give a better end (ties are
+    /// kept), and neither can any cell computed only from them, so the
+    /// result doesn't change. The kept diagonals form a band around `k_end`
+    /// that narrows as the score grows.
+    ///
+    /// Only with no heuristic or `BandedStatic`: the other heuristics read
+    /// the wavefronts, so pruning could change what they cut.
+    fn endsfree_prune(&mut self, score: i32, total: i32) {
+        let radius = (total - score) / -self.penalties.match_;
+        let k_end = self.sequences.text_length - self.sequences.pattern_length;
+        let (lo, hi) = (k_end - radius, k_end + radius);
+        let score_idx = score as usize;
+        let getters: &[fn(&WavefrontComponents<N>, usize) -> *mut crate::wavefront::Wavefront] =
+            match self.penalties.distance_metric {
+                DistanceMetric::GapAffine => &[
+                    WavefrontComponents::get_m_ptr,
+                    WavefrontComponents::get_i1_ptr,
+                    WavefrontComponents::get_d1_ptr,
+                ],
+                DistanceMetric::GapAffine2p => &[
+                    WavefrontComponents::get_m_ptr,
+                    WavefrontComponents::get_i1_ptr,
+                    WavefrontComponents::get_d1_ptr,
+                    WavefrontComponents::get_i2_ptr,
+                    WavefrontComponents::get_d2_ptr,
+                ],
+                _ => &[WavefrontComponents::get_m_ptr],
+            };
+        for get_ptr in getters {
+            let ptr = get_ptr(&self.wf_components, score_idx);
+            if !ptr.is_null() {
+                unsafe { (*ptr).trim_nulled(lo, hi) };
+            }
+        }
     }
 
     /// Backtrace the CIGAR from M-wavefront cell (`k`, `offset`), starting at
@@ -2150,8 +2220,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let plen = pattern.len() as i32;
         let tlen = text.len() as i32;
 
-        let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
-        self.cigar.resize(max_ops);
+        self.cigar.resize(cigar_buffer_len(plen, tlen));
         self.status = AlignStatus::Ok;
 
         // Take sub-aligners out of self so we can borrow self.cigar/penalties separately.
@@ -2733,8 +2802,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let tlen = self.sequences.text_length;
 
         if self.alignment_scope == AlignmentScope::ComputeAlignment {
-            let max_ops = (2 * (plen + tlen)) as usize; // as C: partial (Z-drop) backtraces can exceed plen + tlen before max-trimming
-            self.cigar.resize(max_ops);
+            self.cigar.resize(cigar_buffer_len(plen, tlen));
         }
 
         self.wf_components.resize(plen, tlen, &self.penalties);
@@ -3410,6 +3478,40 @@ mod tests {
         for ((pattern, text), score) in BEGIN_FREE_PAIRS.iter().zip([0, 0, 1]) {
             edit.set_alignment_free_ends(5, 0, 3, 0);
             assert_eq!(edit.align_endsfree(pattern, text), score);
+        }
+    }
+
+    #[test]
+    fn test_empty_sequences_cigar() {
+        // HPCBio/wfa2lib-rs#41: a fresh aligner's CIGAR buffer was empty for
+        // empty pattern and text, and the high-memory backtraces underflowed
+        // `begin_offset` (a panic in debug builds).
+        let affine = WavefrontPenalties::new_affine(crate::penalties::AffinePenalties {
+            match_: 0,
+            mismatch: 4,
+            gap_opening: 6,
+            gap_extension: 2,
+        });
+        for pen in [WavefrontPenalties::new_edit(), affine] {
+            for mode in [MemoryMode::High, MemoryMode::Med, MemoryMode::Low] {
+                for endsfree in [false, true] {
+                    let mut a = WavefrontAligner::<3>::new(pen.clone());
+                    a.set_memory_mode(mode);
+                    a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+                    let score = if endsfree {
+                        a.set_alignment_free_ends(0, 0, 0, 0);
+                        a.align_endsfree(b"", b"")
+                    } else {
+                        a.align_end2end(b"", b"")
+                    };
+                    assert_eq!(score, 0, "{mode:?} endsfree={endsfree}");
+                    assert_eq!(a.status, AlignStatus::Completed);
+                    assert!(a.cigar().is_null());
+                }
+            }
+            let mut a = WavefrontAligner::<3>::new(pen.clone());
+            assert_eq!(a.align_biwfa(b"", b""), 0);
+            assert!(a.cigar().is_null());
         }
     }
 
