@@ -160,3 +160,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   copies) are now a checklist in HPCBio/wfa2lib-rs#31. `bench/sweep.py`
   makes the sweep reproducible on other machines (C also built with
   `-march=native`).
+- **2026-10-15:** med/low piggyback kernels vectorized and fused
+  (HPCBio/wfa2lib-rs#31): none vectorized before (LLVM turned selects
+  between loads into gathers). med/low now 0.52–0.83× its previous time and
+  faster than C on ARM; output unchanged.
+

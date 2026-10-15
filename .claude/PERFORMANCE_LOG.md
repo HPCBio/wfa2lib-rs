@@ -353,3 +353,53 @@ load ~3. CIGAR / score-only. "C" is the default mode, "corr." `--no-c-compat`.
   high/med/low, CIGAR and score-only, no heuristic and two banded-static
   bands), once both include the null-step fix (FIXED_BUGS 14c).
 
+
+## 2026-10-15: vectorized, fused piggyback kernels (med/low, HPCBio/wfa2lib-rs#31)
+
+Branch `perf/piggyback-fused` vs `main` `99943f4`, Apple M2 Pro, best of 3
+(load under 3), CIGAR, ms. Data from the #31 sweep: `m1k_5` (20k × 1 kb,
+5%), `m1k_20` (5k × 1 kb, 20%). C is `3282f83` (scalar on ARM, so C and
+C `-march=native` time the same here).
+
+| Case | C | main | fused | fused/main | fused/C | instr. fused/main |
+|---|---|---|---|---|---|---|
+| m1k_5 edit med | 286 | 259 | 185 | 0.71 | 0.65 | 0.76 |
+| m1k_5 edit low | 282 | 211 | 175 | 0.83 | 0.62 | 0.76 |
+| m1k_5 indel med | 200 | 229 | 167 | 0.73 | 0.83 | 0.77 |
+| m1k_5 indel low | 202 | 226 | 168 | 0.74 | 0.83 | 0.77 |
+| m1k_5 linear med | 392 | 351 | 237 | 0.67 | 0.60 | 0.72 |
+| m1k_5 linear low | 435 | 407 | 287 | 0.70 | 0.66 | 0.74 |
+| m1k_5 affine med | 4160 | 3325 | 2241 | 0.67 | 0.54 | 0.57 |
+| m1k_5 affine low | 4610 | 4032 | 2958 | 0.73 | 0.64 | 0.63 |
+| m1k_5 affine2p med | 27180 | 20665 | 11721 | 0.57 | 0.43 | 0.49 |
+| m1k_5 affine2p low | 29470 | 24332 | 15345 | 0.63 | 0.52 | 0.57 |
+| m1k_20 edit med | 761 | 466 | 243 | 0.52 | 0.32 | 0.58 |
+| m1k_20 edit low | 749 | 464 | 240 | 0.52 | 0.32 | 0.58 |
+| m1k_20 indel med | 421 | 502 | 311 | 0.62 | 0.74 | 0.61 |
+| m1k_20 indel low | 386 | 498 | 319 | 0.64 | 0.83 | 0.61 |
+| m1k_20 linear med | 1090 | 891 | 478 | 0.54 | 0.44 | 0.56 |
+| m1k_20 linear low | 1200 | 1079 | 647 | 0.60 | 0.54 | 0.61 |
+| m1k_20 affine med | 9800 | 7584 | 4836 | 0.64 | 0.49 | 0.51 |
+| m1k_20 affine low | 10880 | 9252 | 6474 | 0.70 | 0.60 | 0.59 |
+| m1k_20 affine2p med | 73800 | 53301 | 30158 | 0.57 | 0.41 | 0.46 |
+| m1k_20 affine2p low | 80400 | 64311 | 40923 | 0.64 | 0.51 | 0.54 |
+
+- Cause: none of the piggyback kernels vectorized in the linked (LTO)
+  binary, including the per-component passes split out for that purpose.
+  LLVM turned `if c { a[i] } else { b[i] }` (a choice between two loads) into
+  a load from a selected address, a gather, which stops vectorization.
+  The crate's own `--emit asm` is misleading with `lto = true`: it is the
+  pre-link pipeline, which skips loop vectorization. Check the linked
+  binary (`objdump -d`).
+- Fix: choose between loaded values with a mask blend
+  (`(a & m) | (b & !m)`); fuse affine/affine2p into one loop per kernel,
+  as C (M from this cell's I/D in registers); each loop in an
+  `#[inline(never)]` function with every array a separate slice parameter
+  (noalias). All five kernels now vectorize (NEON here).
+- med/low is now 0.52–0.83× `main` and 0.32–0.83× C (before: indel med/low
+  1.12–1.34× C). Output identical to C and `main` in every case; the
+  differential harness is clean (1242/1262, the 20 known #22 cases).
+- On x86 (EPYC 7713, quick sweep before this change) med/low was 1.3–1.9×
+  slower than C built with `-march=native` (GCC vectorizes C's fused loops
+  with AVX2). To re-check with `bench/sweep.py`.
+
