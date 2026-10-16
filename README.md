@@ -63,6 +63,26 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 cargo test
 ```
 
+### Chip-specific optimizations
+
+On Skylake-family Intel CPUs (6th–10th generation Core, Skylake-SP and
+Cascade Lake Xeon), the microcode fix for the
+[JCC erratum](https://www.intel.com/content/www/us/en/content-details/841076/intel-mitigations-for-jump-conditional-code-erratum.html)
+makes run time depend on code alignment. On a Xeon Gold 6150, building with
+LLVM's mitigation made edit, indel, gap-linear and X-drop/Z-drop alignments
+7–17% faster, but gap-affine 4% slower; output is unchanged:
+
+```bash
+RUSTFLAGS="-C target-cpu=native -C llvm-args=-x86-branches-within-32B-boundaries" cargo build --release
+```
+
+Other CPUs don't need it. For example: on an AMD EPYC 7713 (Zen 3) it was
+neutral to 7% slower. `RUSTFLAGS` applies to the whole build, so a crate that
+depends on wfa2lib-rs sets it in its own build. To reference specific
+measurements, see HPCBio/wfa2lib-rs#31.
+
+### Tests, Parity, Performance, and CI
+
 The integration tests (`tests/test_vs_reference.rs`) and the C-parity script
 (`tests/wfa_utest.sh`) compare against the reference outputs shipped with the
 C library, so they expect a [WFA2-lib](https://github.com/Marco-Sola-Lab/WFA2-lib)
