@@ -22,7 +22,11 @@ fi
 DEST="$ROOT/target/differential/c-$COMMIT${C_NATIVE:+-native-$(hostname -s)}"
 BIN="$DEST/bin/align_benchmark"
 
-if [ -x "$BIN" ]; then
+# Bump when the build recipe below changes, so cached builds are redone.
+RECIPE=2
+STAMP="$DEST/.build_c-recipe"
+
+if [ -x "$BIN" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$RECIPE" ]; then
   echo "$BIN"
   exit 0
 fi
@@ -31,7 +35,8 @@ fi
 # concurrent runs (e.g. on several hosts sharing a checkout) don't clobber
 # each other: DEST only ever holds a finished build. A DEST without the
 # binary is left over from an interrupted older run.
-[ -d "$DEST" ] && [ ! -x "$BIN" ] && rm -rf "$DEST"
+# A DEST from an older recipe is rebuilt too.
+[ -d "$DEST" ] && { [ ! -x "$BIN" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$RECIPE" ]; } && rm -rf "$DEST"
 FINAL="$DEST"
 DEST="$FINAL.tmp.$(hostname -s).$$"
 trap 'rm -rf "$DEST"' EXIT
@@ -54,6 +59,16 @@ if [ -z "${C_NATIVE:-}" ]; then
 fi
 if [ "$(uname)" = Darwin ]; then
   drop_flag '-fopenmp'
+  # C's profiler reads the clock on macOS with three Mach calls
+  # (host_get_clock_service, clock_get_time, mach_port_deallocate), about
+  # 1.3 us per alignment inside the timed interval: most of the measured
+  # time for short pairs. Use clock_gettime, as on Linux (macOS 10.12+).
+  # Benchmark timing only; alignments are unchanged.
+  timer="$DEST/system/profiler_timer.c"
+  grep -q '^#ifdef __MACH__ // OS X does not have clock_gettime' "$timer" || {
+    echo "build_c.sh: macOS timer patch does not apply to $timer" >&2; exit 1; }
+  sed 's|^#ifdef __MACH__ // OS X does not have clock_gettime.*|#if 0 // build_c.sh: use clock_gettime on macOS too|' \
+    "$timer" > "$timer.tmp" && mv "$timer.tmp" "$timer"
 fi
 
 make -C "$DEST" >"$DEST/build.log" 2>&1 || {
@@ -62,6 +77,7 @@ make -C "$DEST" >"$DEST/build.log" 2>&1 || {
   exit 1
 }
 [ -x "$DEST/bin/align_benchmark" ] || { echo "no binary after the C build" >&2; exit 1; }
+echo "$RECIPE" > "$DEST/.build_c-recipe"
 # Move into place unless another run finished first (then keep theirs).
 # If that race is lost between the check and the move, mv either fails
 # (BSD: directory not empty) or nests our copy inside theirs (GNU), which is
