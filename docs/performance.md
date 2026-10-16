@@ -132,8 +132,8 @@ Rust peak RSS / C peak RSS, median (max) over the cases; Linux runs only (macOS 
   - Gap-affine 2-piece CIGAR in high memory is about even (1.0×) C's
     time (1.28× with static banding), while it is 0.77× on the EPYC. Rust
     executes the same share of C's instructions (0.66×) on both machines, so
-    this is specific to how the Xeon runs that code path. It is under
-    investigation in HPCBio/wfa2lib-rs#31.
+    this is specific to how the Xeon runs that code path. The cause is
+    identified in HPCBio/wfa2lib-rs#31.
   - C built with `-march=native` uses AVX-512 there, so it is the strongest
     C build of the three (median 0.94× for Rust).
   - Skylake-family CPUs are also sensitive to code alignment (the JCC
