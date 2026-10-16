@@ -22,7 +22,7 @@ match.
 | File | Purpose |
 |---|---|
 | `C_COMMIT` | The pinned C commit (the parity target). |
-| `build_c.sh [COMMIT]` | Clones and builds C `align_benchmark` into `target/differential/c-<commit>/`. Source: `$WFA2_LIB_REPO`, else `./WFA2-lib`, else GitHub. It strips `-march=native`, so C uses its scalar kernels everywhere (its AVX2 ends-free kernel gives CPU-dependent results: HPCBio/wfa2lib-rs#34), and on macOS `-fopenmp` (Apple clang has no OpenMP). |
+| `build_c.sh [COMMIT]` | Clones and builds C `align_benchmark` into `target/differential/c-<commit>/`. Source: `$WFA2_LIB_REPO`, else `./WFA2-lib`, else GitHub. It strips `-march=native`, so C uses its scalar kernels everywhere (its AVX2 ends-free kernel gives CPU-dependent results: HPCBio/wfa2lib-rs#34), and on macOS `-fopenmp` (Apple clang has no OpenMP). On macOS it also makes C's benchmark timer use `clock_gettime`, as on Linux: C's Mach clock calls cost about 1.3 µs per alignment inside the timed interval, most of the measured time for short pairs. Cached builds are redone when the build recipe changes (`RECIPE`). |
 | `cases.sh` | Generates the cases: `suite <TAB> dataset <TAB> arguments`. |
 | `run.sh` | Runs and compares the cases (in parallel). |
 | `known_diffs.tsv` | Accepted differences, each with the issue explaining it. |
