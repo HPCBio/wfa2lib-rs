@@ -168,4 +168,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   up to 2.16× slower than C on long/divergent edit/indel/linear, traced with
   `perf` to AVX2 gather stalls in the extend kernel; the gather kernels are
   removed (HPCBio/wfa2lib-rs#31).
+- **2026-10-15:** BiWFA overlap scan vectorized (HPCBio/wfa2lib-rs#31): the
+  breakpoint checks were 73% of affine2p BiWFA time and scalar except the
+  NEON M scan. affine2p ultralow is now 0.38–0.52× C on ARM (was ~1.0×);
+  output unchanged.
 

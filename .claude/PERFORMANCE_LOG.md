@@ -432,3 +432,48 @@ the instructions. The EPYC 7713 quick run showed the same pattern (indel
   x86 now uses the blockwise 64-bit scalar extend, as on ARM. Output is
   unchanged (same offsets). To confirm with `bench/sweep.py` on x86.
 
+
+- Confirmed on the EPYC 7713 (`bench/sweep.py`, `8ccfb64`, 3 runs per case,
+  vs the pre-fix quick run): `l10k_5` indel score 1.69× → 0.80× C,
+  `m1k_20` indel CIGAR 1.25× → 0.87×; edit unchanged (it rarely hit the
+  kernel). With #45, 1k/10k med/low went from a median of 0.94× to 0.45×
+  generic C.
+
+## 2026-10-15: BiWFA overlap scan vectorized (HPCBio/wfa2lib-rs#31)
+
+The full EPYC sweep after #45/#48 left affine2p BiWFA (ultralow) as the main
+case slower than C: 1.08–1.15× generic C, ~2.2× C-native, at 1.2–1.4× C's
+instructions. A `sample` profile on the M2 (`m1k_5` affine2p ultralow) put
+73% of the time in `bialign_overlap`, against 11% each for compute and
+extend.
+
+- At every step BiWFA checks the new wavefronts against the last
+  `max_score_scope` scores of the other direction: one M scan plus four
+  I1/D1/I2/D2 scans for affine2p (scope ~25 with the default penalties).
+  Rust had NEON only for the M scan; the indel scans and every scan on x86
+  were scalar. C has AVX2/AVX-512 versions of both, used when built with
+  `-march=native`: the C-native gap.
+- Fix: one `scan_overlap` for all five scans. Chunks of 8 diagonals are
+  tested at once (NEON: 2 × 4 lanes; AVX2: one `vpermd`-reversed load,
+  inlined with `target-cpu=native`, runtime-detected otherwise); only a chunk
+  with a candidate is rechecked one diagonal at a time. The visiting order is
+  unchanged, so the breakpoint is the same as the scalar scan (and C's).
+- M2 (`data-quick`, Rust vs `main` vs C 3282f83, ultralow, CIGAR output):
+
+| Case | `main` | this | C | this / C |
+|---|---|---|---|---|
+| m1k_5 affine2p | 1612 ms | 732 ms | 1.58 s | 0.46 |
+| m1k_5 affine2p m-1 | 7118 ms | 2799 ms | 7.45 s | 0.38 |
+| l10k_5 affine2p | 1325 ms | 702 ms | 1.36 s | 0.52 |
+| l10k_5 affine2p m-1 | 3576 ms | 1474 ms | 3.63 s | 0.41 |
+| m1k_5 affine | 132 ms | 122 ms | 149 ms | 0.82 |
+| m1k_5 edit / indel / linear | | unchanged | | 0.83 / 0.85 / 0.81 |
+
+- Output identical to C and `main` in all cases above, and in x86 builds
+  (AVX2 and generic, run under Rosetta) on subsets. Differential harness:
+  1242/1262 identical, the 20 known #22 cases. New unit tests compare the
+  scan with a naive scan (tails, nulls, rejected indel hits) and the SIMD
+  chunk tests with scalar; both catch a deliberately broken lane pairing
+  and a scan that skips the rest of a chunk.
+- To confirm on x86 with `bench/sweep.py` (expect affine2p ultralow near or
+  below C-native).
