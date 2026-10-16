@@ -22,6 +22,10 @@ On the node, run with --offline. Builds happen on the node: Rust and the
 native C build target the CPU they're built on, so they live in per-host
 directories and are never reused from another machine (a login node).
 
+Several hosts can run from one shared checkout at once: builds and results
+are per host, and the shared C build and datasets are created atomically.
+On a single host, run one sweep per commit at a time (or give each --out).
+
 Results go to target/bench-sweep/<host>-<commit>[-dirty][-quick]/ (or
 --out): results.tsv (one row per tool and case) and summary.md (ratios vs
 C, machine info), so runs of different commits on one host don't
@@ -347,8 +351,11 @@ def main():
         path = os.path.join(datadir, name + ".seq")
         if not os.path.exists(path):
             print("generating %s (%d pairs)" % (name, pairs), file=sys.stderr)
-            generate(path + ".tmp", pairs, length, err, indels, flank, seed=sum(map(ord, name)))
-            os.rename(path + ".tmp", path)
+            # Private temporary file, renamed into place: safe when runs on
+            # several hosts share a checkout (the content is deterministic)
+            tmp = "%s.tmp.%s.%d" % (path, host_name(), os.getpid())
+            generate(tmp, pairs, length, err, indels, flank, seed=sum(map(ord, name)))
+            os.replace(tmp, path)
 
     info = machine_info() + ["instructions: %s" % ("perf stat" if use_perf else ("time -l" if sys.platform == "darwin" else "unavailable")),
                              "tools: %s" % ", ".join(sorted(tools)), "runs per case: %d" % reps]

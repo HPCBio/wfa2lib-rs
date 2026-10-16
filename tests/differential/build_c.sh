@@ -27,7 +27,14 @@ if [ -x "$BIN" ]; then
   exit 0
 fi
 
-rm -rf "$DEST"
+# Build in a private directory and move it into place when complete, so
+# concurrent runs (e.g. on several hosts sharing a checkout) don't clobber
+# each other: DEST only ever holds a finished build. A DEST without the
+# binary is left over from an interrupted older run.
+[ -d "$DEST" ] && [ ! -x "$BIN" ] && rm -rf "$DEST"
+FINAL="$DEST"
+DEST="$FINAL.tmp.$(hostname -s).$$"
+trap 'rm -rf "$DEST"' EXIT
 mkdir -p "$(dirname "$DEST")"
 git clone --quiet "$WFA2_LIB_REPO" "$DEST" >&2
 git -C "$DEST" checkout --quiet "$COMMIT"
@@ -50,8 +57,18 @@ if [ "$(uname)" = Darwin ]; then
 fi
 
 make -C "$DEST" >"$DEST/build.log" 2>&1 || {
-  echo "C build failed; see $DEST/build.log" >&2
+  cp "$DEST/build.log" "$FINAL.build-failed.log" 2>/dev/null
+  echo "C build failed; see $FINAL.build-failed.log" >&2
   exit 1
 }
-[ -x "$BIN" ] || { echo "no $BIN after build" >&2; exit 1; }
+[ -x "$DEST/bin/align_benchmark" ] || { echo "no binary after the C build" >&2; exit 1; }
+# Move into place unless another run finished first (then keep theirs).
+# If that race is lost between the check and the move, mv either fails
+# (BSD: directory not empty) or nests our copy inside theirs (GNU), which is
+# removed below; either way their finished build is used.
+if [ ! -e "$FINAL" ]; then
+  mv "$DEST" "$FINAL" 2>/dev/null || true
+fi
+rm -rf "$FINAL/$(basename "$DEST")"
+[ -x "$BIN" ] || { echo "no $BIN after the C build" >&2; exit 1; }
 echo "$BIN"
