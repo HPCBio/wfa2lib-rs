@@ -20,33 +20,31 @@ This implementation covers the full WFA feature set:
 
 ## Performance
 
-Benchmarked against the C reference implementation (WFA2-lib), 50,000 sequence pairs of 1000 bp at 5% divergence:
+Rust time / C time (below 1: Rust is faster), median over the cases in each
+group, measured with `bench/sweep.py` at commit `fc51088` against C WFA2-lib
+`3282f83` built without `-march=native`. Output is identical to C in all 301
+cases on every machine.
 
-### x86_64 (Intel Broadwell, AVX2)
-
-| Benchmark | Rust | C | Ratio |
+| Cases | Apple M2 Pro | AMD EPYC 7713 | Intel Xeon Gold 6150 |
 |---|---|---|---|
-| Edit distance (score) | 405 ms | 446 ms | **0.91x** |
-| Gap-linear (score) | 682 ms | 1090 ms | **0.63x** |
-| Gap-affine (score) | 3980 ms | 3970 ms | **1.00x** |
-| Gap-affine (CIGAR) | 5440 ms | 5380 ms | 1.01x |
-| Gap-affine 2-piece (score) | 16800 ms | 19710 ms | **0.85x** |
-| Gap-affine 2-piece (CIGAR) | 20620 ms | 22070 ms | **0.93x** |
-| BiWFA (ultralow memory) | 7133 ms | 6660 ms | 1.07x |
+| Score only, high memory | 0.97 | 0.71 | 0.85 |
+| CIGAR, high memory | 0.98 | 0.73 | 0.92 |
+| CIGAR, med/low memory | 0.52 | 0.44 | 0.51 |
+| CIGAR, BiWFA (ultralow memory) | 0.95 | 0.75 | 0.79 |
+| Ends-free / extension, high memory | 0.84 | 0.60 | 0.71 |
+| Heuristics (adaptive, X/Z-drop, banded) | 0.90 | 0.78 | 0.89 |
+| 150 bp reads, med/low memory | 1.24 | 1.20 | 1.34 |
+| **All 301 cases** | **0.87** | **0.69** | **0.80** |
 
-### aarch64 (Apple M-series, NEON)
-
-| Benchmark | Rust vs C | Notes |
-|---|---|---|
-| Edit distance (score) | **0.56x** | 1.8× faster |
-| Gap-linear (score) | **0.68x** | 1.5× faster |
-| Gap-affine (score) | **0.85x** | 1.2× faster |
-| Gap-affine (CIGAR) | **0.90x** | 1.1× faster |
-| Gap-affine 2-piece (score) | **0.88x** | 1.1× faster |
-| Gap-affine 2-piece (CIGAR) | **0.86x** | 1.2× faster |
-| BiWFA (ultralow memory) | **0.86x** | 1.2× faster |
-
-Ratio < 1.0 means Rust is faster. Key optimizations include hand-written AVX2/NEON SIMD compute kernels (8 or 4 diagonals/iteration) with software prefetching, pre-centered wavefront offset pointers (matching C's `offsets = offsets_mem - min_lo` pattern), separate per-component wavefront arrays for optimal cache stride, arena bump allocation with cache coloring to eliminate L1 conflict misses, conditional kernel dispatch (affine fallback when O2/E2 inputs are null), wavefront reuse between alignments, and blockwise 64-bit sequence extension.
+Rust gains most with med/low memory, ends-free and extension alignments, and
+gap-affine 2-piece BiWFA. Known gaps: 150 bp reads with med/low memory are
+slower than C everywhere. On the Xeon, an older design (Skylake-SP, 2017),
+both tools are slower than on the EPYC, but Rust more so (median 1.47× its
+EPYC time, against 1.29× for C), and gap-affine 2-piece CIGAR is about at
+parity with C. High-memory CIGAR on long pairs can use up to 1.9× C's peak
+memory. Details, datasets, per-algorithm tables and how to reproduce them are
+in [`docs/performance.md`](docs/performance.md); ongoing work is tracked in
+HPCBio/wfa2lib-rs#31.
 
 ## Building
 
@@ -106,7 +104,9 @@ For performance, `bench/sweep.py` builds both tools (C also with
 `-march=native`), generates fixed datasets and compares time, instructions,
 memory and output across metrics, memory modes, spans and heuristics; it
 writes `target/bench-sweep/<host>-<commit>/summary.md`. Run it on an idle
-machine (`--quick` for a short check). Results are tracked in
+machine (`--quick` for a short check). `bench/report.py` turns sweeps
+from several machines into the tables in
+[`docs/performance.md`](docs/performance.md). Ongoing work is tracked in
 HPCBio/wfa2lib-rs#31.
 
 CI (`.github/workflows/ci.yml`) runs clippy, the tests (release, and debug
@@ -224,7 +224,9 @@ tests/
   wfa_utest.sh        # Stock C unit tests on the Rust CLI (needs ./WFA2-lib)
   data/               # Fixtures for the CLI tests
   differential/       # Rust-vs-C differential harness (pinned C commit)
-bench/                # Rust-vs-C timing scripts
+bench/                # Rust-vs-C timing scripts (sweep.py, report.py)
+docs/
+  performance.md      # Rust-vs-C results on three machines
 .github/workflows/
   ci.yml              # CI: clippy, tests, wfa_utest.sh, differential harness
 ```
