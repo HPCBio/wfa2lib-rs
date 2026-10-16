@@ -164,4 +164,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   (HPCBio/wfa2lib-rs#31): none vectorized before (LLVM turned selects
   between loads into gathers). med/low now 0.52–0.83× its previous time and
   faster than C on ARM; output unchanged.
+- **2026-10-15:** x86 sweeps (`bench/sweep.py` on the HPCBio cluster): Rust
+  up to 2.16× slower than C on long/divergent edit/indel/linear, traced with
+  `perf` to AVX2 gather stalls in the extend kernel; the gather kernels are
+  removed (HPCBio/wfa2lib-rs#31).
 

@@ -47,6 +47,8 @@ Each kernel has the same structure:
 
 The extend kernel (`src/extend.rs`) does NOT have AVX2 — it uses blockwise 64-bit scalar comparison which is already very fast. SIMD extend would require gather/scatter for diagonal-indexed sequence access and is unlikely to help.
 
+> **2026-10-15:** a gather-based AVX2 extend (C's design, for wavefronts of 256+ diagonals) was added later and has been removed again (HPCBio/wfa2lib-rs#31): on Xeon Skylake-SP it took 88% of the time on long indel alignments, 65% of that on its two `vpgatherdd`, and Rust ran 2.16× slower than C's scalar extend. The prediction above held.
+
 ## AVX2-Specific Notes
 
 - AVX2 processes **8 diagonals per iteration** (vs NEON's 4)
