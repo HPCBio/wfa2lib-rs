@@ -403,3 +403,32 @@ C `-march=native` time the same here).
   slower than C built with `-march=native` (GCC vectorizes C's fused loops
   with AVX2). To re-check with `bench/sweep.py`.
 
+
+## 2026-10-15: x86 extend stalls on AVX2 gathers (HPCBio/wfa2lib-rs#31)
+
+`bench/sweep.py` on `hpcbio` (Xeon Gold 6150, Skylake-SP; `main` `aa091cf`)
+had Rust up to 2.16× slower than generic (scalar) C on long or divergent
+edit/indel/linear alignments (`l10k_5`, `m1k_20`), while executing about 0.6×
+the instructions. The EPYC 7713 quick run showed the same pattern (indel
+1.22–1.25×). `perf` on `l10k_5 indel score`:
+
+| | C (scalar) | Rust |
+|---|---|---|
+| cycles | 0.70 G | 1.50 G |
+| instructions | 2.74 G | 1.56 G |
+| stall cycles (total) | 0.013 G | 0.487 G |
+| stalls on L1 miss | 0.5 M | 4.6 M |
+| 4K-alias events | 2.5 M | 5.3 M |
+
+- 88% of Rust's time was in `extend_end2end_avx2`, 65% of that on its two
+  `vpgatherdd` (gather 4 bytes of pattern and text for 8 diagonals). The
+  stalls are gather latency, not memory (L1/L2/LLC misses, store buffer and
+  4K aliasing are all small).
+- Rust used the kernel only for wavefronts of 256+ diagonals, so the 1 kb/5%
+  benchmark it was tuned on rarely ran it. C's AVX2 build uses the same
+  gathers (slower than its scalar build on the EPYC too); on Skylake-SP
+  C-native uses its AVX-512 kernel instead.
+- Fix: removed the gather kernels (end-to-end and the BiWFA max variant);
+  x86 now uses the blockwise 64-bit scalar extend, as on ARM. Output is
+  unchanged (same offsets). To confirm with `bench/sweep.py` on x86.
+
