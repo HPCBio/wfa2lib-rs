@@ -486,6 +486,37 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
 - **Tests:** `tests/corrected_xdrop.rs` (pair 201,
   `tests/data/issue21_xdrop.seq`, all three gap metrics).
 
+### 14e. Z-drop ends backtraced at the wrong score (HPCBio/wfa2lib-rs#22)
+
+- **C bug:** on a Z-drop, `wavefront_unialign_terminate` backtraces the best
+  cell's diagonal and offset (found at `max_wf_score`) starting at the
+  *current* score, where that cell needn't exist.
+  - High memory: the backtrace finds no source, stops, and pads with
+    unchecked `M`s plus leading indels. With default penalties that is
+    usually max-trimmed to empty; with `match < 0` the CIGARs are invalid
+    (e.g. `2I58M` on a 2 kb, 8%-error pair; up to 300/300 invalid on
+    `long.seq`, affine `-3,5,3,2`, Z-drop `100,5`).
+  - Med/low: the cell at the current score is often dead, and its
+    `bt_pcigar/bt_prev` were never initialized (leftovers of earlier
+    alignments in C; zeroes in Rust), so C's high and med results differ and
+    C's med depends on what it aligned before.
+- **Fix (corrected mode):** backtrace the best cell at `max_wf_score`
+  (`backtrace_zdrop_end`): high memory from the stored wavefronts; med/low
+  from the cell's `(pcigar, prev)` kept when it became the best
+  (`zdrop_best_bt`), pinned through buffer compaction (which now pins a
+  slice: the ends-free candidate and the Z-drop cell).
+- **Result:** Z-drop `20,1` / `50,1` / `50,10` / `100,5` × default and
+  `-3,5,3,2` × global / extension / ends-free × {`wfa.utest.seq`,
+  `long.seq`}: every partial CIGAR valid, and high = med except co-optimal
+  ties that score the same (an empty CIGAR vs `1M`/`2M`, score 0). C mode
+  is unchanged.
+- **Note:** with `match == 0`, C's Z-drop score makes the start the best
+  cell, so this fix alone leaves most such partial alignments empty; see
+  14f.
+- **Tests:** `tests/corrected_zdrop.rs` (`long.seq` pair 1,
+  `tests/data/issue22_zdrop.seq`; a generated pair whose Z-drop comes after
+  two compaction probes, which fails without the pin).
+
 ## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)
 
 - **Symptom:** a fresh aligner given an empty pattern and an empty text,

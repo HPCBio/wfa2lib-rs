@@ -36,6 +36,11 @@ pub enum HeuristicStrategy {
     /// score falls more than `zdrop` below the best seen, checked every
     /// `steps_between_cutoffs` steps. The result is the partial alignment up to
     /// the best-scoring cell.
+    ///
+    /// **Known issue (parity with C WFA2-lib):** C backtraces that cell at the
+    /// wrong score, so the partial alignment can be empty, invalid, or differ
+    /// between memory modes (HPCBio/wfa2lib-rs#22). Fixed by
+    /// [`crate::aligner::Compat::Corrected`].
     ZDrop {
         zdrop: i32,
         steps_between_cutoffs: i32,
