@@ -164,11 +164,11 @@ which includes banded heuristics that the stock `wfa.utest.sh` doesn't cover.
   - It's a C regression from `380eb31b` (backtrace bounds checks moved
     from `lo/hi` to the initialized range). C at `380eb31b^` gives valid
     CIGARs.
-  - Rust reproduces it for output identity, documented on
-    `set_alignment_free_ends`. **Known issue HPCBio/wfa2lib-rs#18.**
+  - Rust reproduced it for output identity (HPCBio/wfa2lib-rs#18).
   - Reported upstream as Marco-Sola-Lab/WFA2-lib#142, with a reproducer and a
     verified one-line fix: set `wf_elements_init_min/max = lo/hi` on M0 in
-    `wavefront_aligner_init_wf_m`.
+    `wavefront_aligner_init_wf_m`. Merged as Marco-Sola-Lab/WFA2-lib#144
+    (6176f94) and ported (see 14b).
 - **Result:** ends-free (begin and/or end gaps) and extension are
   byte-identical to C for all metrics, match == 0 and match < 0, in
   alignment, score-only and med modes.
@@ -451,7 +451,10 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   onto the seeds and emits unchecked `M`s.
 - **Fix (corrected mode):** set M0's initialized range to `[-P0, T0]`, the
   fix proposed upstream. Gap metrics are unaffected (identical in both modes).
-- **Tests:** `issue_18_edit_begin_gaps`, `edit_indel_random_against_oracle`
+- **Upstream (2026-10-17):** merged as Marco-Sola-Lab/WFA2-lib#144 (C 6176f94).
+  `C_COMMIT` bumped and the fix applied in both modes; no longer a
+  corrected-mode difference.
+- **Tests:** `issue_18_edit_begin_gaps` (now checks C mode), `edit_indel_random_against_oracle`
   (3000 cases vs the DP oracle, all memory modes).
 
 ## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)

@@ -41,7 +41,7 @@ Checked with `tests/differential/run.sh` (1262 cases against the C commit in
 | BiWFA + any heuristic | Byte-identical to C 3282f83 (168/168: banded-static/adaptive, xdrop, zdrop, wfa-adaptive; CIGAR and score-only; HPCBio/wfa2lib-rs#6) |
 | `--wfa-memory=med\|low` (piggyback backtrace) | Byte-identical to C 3282f83 for all metrics (28/28 matrix cells, 50k × 1 kb), with heuristics as above (HPCBio/wfa2lib-rs#8) |
 | extension; ends-free with end gaps only | Byte-identical to C (all metrics incl. match < 0, alignment and score-only) |
-| ends-free with begin gaps (P0/T0 > 0) | Byte-identical to C, match == 0 and match < 0, alignment / score-only / med (HPCBio/wfa2lib-rs#9). Note: for edit/indel this includes a C bug that can emit an invalid CIGAR (known issue HPCBio/wfa2lib-rs#18, from C `380eb31b`) |
+| ends-free with begin gaps (P0/T0 > 0) | Byte-identical to C, match == 0 and match < 0, alignment / score-only / med (HPCBio/wfa2lib-rs#9). Edit/indel CIGARs valid since C 6176f94 (Marco-Sola-Lab/WFA2-lib#144, HPCBio/wfa2lib-rs#18) |
 
 ### Upstream C sync
 
@@ -52,14 +52,16 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   banded output (HPCBio/wfa2lib-rs#6, `3b16283` and the BiWFA commit).
 - [x] 90582eb (Marco-Sola-Lab/WFA2-lib#126): ends-free begin seeding only for ends-free span. Implemented this way in HPCBio/wfa2lib-rs#9; the baseline's end-to-end widening was never ported
   (HPCBio/wfa2lib-rs#9).
+- [x] 11b225e / 6176f94 (Marco-Sola-Lab/WFA2-lib#144): M0's initialized range
+  covers the ends-free begin seeds, so edit/indel begin-gap CIGARs are valid
+  (HPCBio/wfa2lib-rs#18). Was corrected-mode only; now unconditional.
+- n/a cda19a0 (Marco-Sola-Lab/WFA2-lib#140): slab clears only the wavefronts
+  used since the last clear. Speed only, no output change.
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and
   C++-binding commits.
 
 ### Known issues kept for C parity
 
-- HPCBio/wfa2lib-rs#18: edit/indel ends-free with begin gaps can return an invalid CIGAR
-  (C regression from `380eb31b`; reported as Marco-Sola-Lab/WFA2-lib#142 with a
-  proposed fix). **Fixed in corrected mode** (`Compat::Corrected`; FIXED_BUGS 14b).
 - HPCBio/wfa2lib-rs#21: X-drop with `steps_between_cutoffs > 1` returns invalid
   CIGARs (C high-memory backtrace over pruned diagonals; C's `med` is valid).
 - HPCBio/wfa2lib-rs#22: Z-drop results differ between C's high-memory and `med`
@@ -97,7 +99,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - COMBINE-lab/wfa2lib-rs#6: bugs 1–2 (bounds check, `init_ends`). Open.
 - Queued: bugs 3–4 (HPCBio/wfa2lib-rs#12 + HPCBio/wfa2lib-rs#14), then the
   CLI changes and ends-free begin gaps.
-- Marco-Sola-Lab/WFA2-lib#142: edit/indel begin-gap invalid CIGAR. Reported.
+- Marco-Sola-Lab/WFA2-lib#142: edit/indel begin-gap invalid CIGAR. Fixed upstream
+  by Marco-Sola-Lab/WFA2-lib#144 (merged 2026-10-16, 6176f94); ported.
 
 ## Log
 
@@ -173,3 +176,6 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   NEON M scan. affine2p ultralow is now 0.38–0.52× C on ARM (was ~1.0×);
   output unchanged.
 
+- **2026-10-17:** C `C_COMMIT` 3282f83 → 6176f94. Marco-Sola-Lab/WFA2-lib#144
+  (our fix for Marco-Sola-Lab/WFA2-lib#142) merged upstream, so the edit/indel
+  begin-gap fix (HPCBio/wfa2lib-rs#18) now applies in default C mode too.

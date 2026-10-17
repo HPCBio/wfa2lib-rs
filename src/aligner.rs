@@ -72,12 +72,6 @@ pub enum MemoryMode {
 ///   lengths gives its real score. Also applies to extension alignment.
 ///   It can take more steps than C (up to the optimal score).
 ///
-/// - **Edit/indel ends-free with begin gaps** (HPCBio/wfa2lib-rs#18, a C
-///   regression from `380eb31b`, reported as Marco-Sola-Lab/WFA2-lib#142): C can
-///   return an invalid CIGAR (a mismatching column as `M`; the score is
-///   right). Corrected mode marks the begin-free seeds as initialized, the
-///   fix proposed upstream, so the backtrace can reach them.
-///
 /// Gap-linear/affine/affine2p with `match == 0` give identical results in
 /// both modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -520,14 +514,8 @@ impl<const N: usize> WavefrontAligner<N> {
     ///
     /// # Known issues (parity with C WFA2-lib)
     ///
-    /// Output is identical to C WFA2-lib, including these upstream issues:
+    /// Output is identical to C WFA2-lib, including this upstream issue:
     ///
-    /// - **Edit/indel with begin gaps** (`*_begin_free > 0`) can return an
-    ///   invalid CIGAR: a mismatching column reported as `M`. The score is
-    ///   correct, and gap-linear/affine/affine2p are unaffected. This is a
-    ///   regression in C WFA2-lib (from commit `380eb31b`); tracked in
-    ///   <https://github.com/HPCBio/wfa2lib-rs/issues/18>. Fixed by
-    ///   [`Compat::Corrected`].
     /// - **With a match reward** (`match < 0`), the chosen ends-free alignment
     ///   can be suboptimal (<https://github.com/Marco-Sola-Lab/WFA2-lib/issues/102>):
     ///   shifted by a repeat unit
@@ -900,17 +888,13 @@ impl<const N: usize> WavefrontAligner<N> {
                         set_bt_init(&mut *wf_ptr, buf, -v, v, 0);
                     }
                 }
-                // C sets lo/hi only; the initialized range stays [0, 0]
-                // (widened later by the gap-metric `init_ends`, never by edit).
+                // The seeds are initialized too, so the edit/indel backtrace
+                // can step onto them (Marco-Sola-Lab/WFA2-lib#144, fixing
+                // HPCBio/wfa2lib-rs#18).
                 (*wf_ptr).lo = -p0;
                 (*wf_ptr).hi = t0;
-                // Corrected mode: the seeds are initialized too, so the
-                // edit/indel backtrace can step onto them (HPCBio/wfa2lib-rs#18,
-                // the fix proposed in Marco-Sola-Lab/WFA2-lib#142).
-                if self.compat == Compat::Corrected {
-                    (*wf_ptr).wf_elements_init_min = -p0;
-                    (*wf_ptr).wf_elements_init_max = t0;
-                }
+                (*wf_ptr).wf_elements_init_min = -p0;
+                (*wf_ptr).wf_elements_init_max = t0;
                 // The seeds' backtraces are valid (read by med/low when the
                 // alignment ends on a seed's diagonal at score 0).
                 if self.wf_components.bt_buffer.is_some() {
