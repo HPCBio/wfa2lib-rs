@@ -383,3 +383,50 @@ fn memory_med_low_match_c() {
         assert_eq!(out, expected(alg), "{mem}");
     }
 }
+
+#[test]
+fn unreachable_score_only_corrected_prints_minus_one() {
+    // HPCBio/wfa2lib-rs#23: with no alignment, C's score-only output is a
+    // score with nothing behind it. wfa.utest.seq pair 262 with X-drop 20,1
+    // and a match reward is unreachable: unidirectional C converts the score
+    // where it gave up at the unset end position (a signed overflow, -113),
+    // and BiWFA leaves INT32_MIN. Corrected mode prints -1, as CIGAR mode.
+    let drop = [
+        "-a",
+        "gap-affine-wfa",
+        "--affine-penalties=-3,5,3,2",
+        "--wfa-heuristic=xdrop",
+        "--wfa-heuristic-parameters=20,1",
+        "--wfa-score-only",
+    ];
+    for (mem, c_out) in [
+        (None, "-113\t-\n"),
+        (Some("--wfa-memory=ultralow"), "-2147483648\t-\n"),
+    ] {
+        let mut args = drop.to_vec();
+        args.extend(mem);
+        assert_eq!(run_file("issue23_unreachable.seq", &args), c_out, "{mem:?}");
+        args.push("--no-c-compat");
+        assert_eq!(
+            run_file("issue23_unreachable.seq", &args),
+            "-1\t-\n",
+            "{mem:?}"
+        );
+    }
+
+    // With match == 0, C prints the negated score where it gave up.
+    let pattern = "ACGTTGCAAGCT".repeat(10);
+    let text = &pattern[..90];
+    let band = [
+        "-a",
+        "gap-affine-wfa",
+        "--wfa-heuristic=banded-static",
+        "--wfa-heuristic-parameters=-5,5",
+        "--wfa-score-only",
+    ];
+    let c_lines = run("unreachable_so", &[(&pattern, text)], &band);
+    assert_ne!(c_lines, ["-1\t-"]);
+    let mut args = band.to_vec();
+    args.push("--no-c-compat");
+    assert_eq!(run("unreachable_so", &[(&pattern, text)], &args), ["-1\t-"]);
+}

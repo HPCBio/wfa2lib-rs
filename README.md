@@ -194,7 +194,10 @@ can return an invalid CIGAR, and Z-drop, where C backtraces the partial
 alignment from the wrong score (empty or invalid CIGARs, and results that
 differ between memory modes). With `match == 0` (the default penalties), it
 also fixes the sign of the score X-drop and Z-drop use, which in C makes
-X-drop abandon most divergent pairs. See `Compat` in the API docs.
+X-drop abandon most divergent pairs. See `Compat` in the API docs. In the
+CLI, `--no-c-compat` also makes score-only output `-1` when no alignment was
+found, as CIGAR output does (C prints the score where the search gave up, a
+value from a signed overflow, or `INT32_MIN` for BiWFA).
 
 ## Project structure
 

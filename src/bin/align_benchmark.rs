@@ -12,6 +12,7 @@ use wfa2lib_rs::aligner::{
 };
 use wfa2lib_rs::cigar::Cigar;
 use wfa2lib_rs::heuristic::HeuristicStrategy;
+use wfa2lib_rs::offset::OFFSET_NULL;
 use wfa2lib_rs::penalties::{
     Affine2pPenalties, AffinePenalties, DistanceMetric, LinearPenalties, WavefrontPenalties,
 };
@@ -387,6 +388,19 @@ impl AnyAligner {
             .then(|| (pos.offset.wrapping_sub(pos.k), pos.offset))
     }
 
+    /// Whether the alignment ended without reaching the end and without a
+    /// Z-drop cell, so there is no alignment to score (corrected mode prints
+    /// -1 for it in score-only mode, HPCBio/wfa2lib-rs#23).
+    fn no_alignment(&self) -> bool {
+        let (status, pos) = match self {
+            AnyAligner::N1(a) => (a.status(), a.alignment_end_pos),
+            AnyAligner::N3(a) => (a.status(), a.alignment_end_pos),
+            AnyAligner::N5(a) => (a.status(), a.alignment_end_pos),
+        };
+        matches!(status, AlignStatus::Partial | AlignStatus::EndUnreachable)
+            && pos.offset == OFFSET_NULL
+    }
+
     fn cigar(&self) -> &Cigar {
         match self {
             AnyAligner::N1(a) => a.cigar(),
@@ -610,8 +624,16 @@ fn main() {
                 .unreached_end()
                 .unwrap_or((pattern.len() as i32, text.len() as i32))
         };
-        // C leaves a failed BiWFA score at `cigar_clear`'s INT32_MIN.
-        let output_score = if biwfa_score_failed {
+        // Score-only output when there is no alignment to score. C prints a
+        // failed BiWFA score as `cigar_clear`'s INT32_MIN, and an unreachable
+        // one as the score where the search gave up, converted at the unset
+        // end position (with a match reward, a signed overflow). Corrected
+        // mode prints -1, as CIGAR mode does with no alignment
+        // (HPCBio/wfa2lib-rs#23).
+        let no_alignment = biwfa_score_failed || (!use_biwfa && aligner.no_alignment());
+        let output_score = if score_only && cli.no_c_compat && no_alignment {
+            -1
+        } else if biwfa_score_failed {
             i32::MIN
         } else {
             compute_output_score(
