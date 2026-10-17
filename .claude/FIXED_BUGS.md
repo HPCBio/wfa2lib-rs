@@ -483,8 +483,10 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   source was pruned. The CIGAR merges them into one gap, so it rescores
   below the WFA score (never above): e.g. pair 298, affine `100,5`, 242 vs
   248. C's valid CIGARs show the same (affine2p `50,10`: 5/305 pairs).
-- **Tests:** `tests/corrected_xdrop.rs` (pair 201,
-  `tests/data/issue21_xdrop.seq`, all three gap metrics).
+- **Tests:** `tests/corrected_xdrop.rs` (all three gap metrics). First pair
+  201 with default penalties; since 14f changes X-drop's scores at
+  `match == 0`, pair 305 (`tests/data/issue21_xdrop.seq`) with match-reward
+  penalties and X-drop `20,2`.
 
 ### 14e. Z-drop ends backtraced at the wrong score (HPCBio/wfa2lib-rs#22)
 
@@ -511,11 +513,32 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   ties that score the same (an empty CIGAR vs `1M`/`2M`, score 0). C mode
   is unchanged.
 - **Note:** with `match == 0`, C's Z-drop score makes the start the best
-  cell, so this fix alone leaves most such partial alignments empty; see
-  14f.
+  cell, so this fix alone leaves most such partial alignments empty; 14f
+  fixes that.
 - **Tests:** `tests/corrected_zdrop.rs` (`long.seq` pair 1,
   `tests/data/issue22_zdrop.seq`; a generated pair whose Z-drop comes after
   two compaction probes, which fails without the pin).
+
+### 14f. X-drop/Z-drop with match == 0: sign-flipped SW score (HPCBio/wfa2lib-rs#55)
+
+- **C bug:** a regression from 51fb1aa (2023-03-19). X-drop and Z-drop score
+  cells with `(swg_match·(v+h) − wf_score)/2`. Before 51fb1aa, `match == 0`
+  used `(v+h) − wf_score` ("use match-score=1"); since then it is
+  `swg_match = -1`, so making progress lowers the score.
+  - X-drop prunes the diagonals that progress most: with default penalties
+    it abandons nearly every divergent pair (`long.seq`: 0–81 of 300
+    optimal, typically 0).
+  - Z-drop's best cell is the start, so its partial alignment is empty or
+    the leading matches (hidden in C by 14e).
+- **Fix (corrected mode):** `heuristic::swg_match` returns +1 for
+  `match == 0` (C: -1), passed to the heuristics in place of the match
+  penalty. The shared formula keeps the `/2`, so +1 has half the scale of
+  the pre-51fb1aa special case.
+- **Result:** X-drop with default penalties is optimal on 300/300 `long.seq`
+  pairs for affine/linear/affine2p at `50,10` and `100,5` (293–300 at
+  `50,1`); Z-drop gives real partial alignments (e.g. `50,10` on
+  `long.seq`: the full optimal alignment), high = med.
+- **Tests:** `test_compute_sw_scores_c_formula` (both stand-ins).
 
 ## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)
 

@@ -73,6 +73,10 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   cells as zeroes (deterministic; matches C on fresh memory). C's high mode
   backtraces at the same wrong score (empty or invalid CIGARs). **Fixed in
   corrected mode** (FIXED_BUGS 14e).
+- HPCBio/wfa2lib-rs#55: X-drop/Z-drop with `match == 0` use a sign-flipped
+  Smith-Waterman score (C regression from 51fb1aa): X-drop abandons most
+  divergent pairs, Z-drop's best cell is the start. **Fixed in corrected
+  mode** (FIXED_BUGS 14f).
 - HPCBio/wfa2lib-rs#23: score-only score for unreachable alignments (match < 0)
   is evaluated at C's unset end position (signed overflow); reproduced.
 - HPCBio/wfa2lib-rs#24: edit/indel + banded-static never terminates in C;
@@ -196,3 +200,7 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   is backtraced from the best cell at the score it was found at (its
   backtrace kept and pinned for med/low). All memory modes agree and every
   partial CIGAR is valid; C's high mode had invalid ones with match < 0.
+- **2026-10-17:** HPCBio/wfa2lib-rs#55 (found while fixing #22): with
+  `match == 0`, C's X-drop/Z-drop score has its sign flipped since 51fb1aa.
+  Corrected mode uses +1: X-drop with default penalties goes from ~0/300 to
+  300/300 optimal on `long.seq`.

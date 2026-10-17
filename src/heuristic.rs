@@ -6,6 +6,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use crate::aligner::Compat;
 use crate::offset::{DPMATRIX_DIAGONAL_NULL, OFFSET_NULL, WfOffset, wavefront_h, wavefront_v};
 use crate::wavefront::Wavefront;
 
@@ -26,7 +27,9 @@ pub enum HeuristicStrategy {
     /// **Known issue (parity with C WFA2-lib):** with `steps_between_cutoffs > 1`
     /// the CIGAR can be invalid (C's backtrace reads wavefronts the cutoff
     /// trimmed to empty, HPCBio/wfa2lib-rs#21). Scores are unaffected, and
-    /// `steps_between_cutoffs == 1` produces valid CIGARs. Fixed by
+    /// `steps_between_cutoffs == 1` produces valid CIGARs. With `match == 0`,
+    /// C's score makes progress look like a drop, so the diagonals that
+    /// progress most are pruned (HPCBio/wfa2lib-rs#55). Both fixed by
     /// [`crate::aligner::Compat::Corrected`].
     XDrop {
         xdrop: i32,
@@ -39,8 +42,9 @@ pub enum HeuristicStrategy {
     ///
     /// **Known issue (parity with C WFA2-lib):** C backtraces that cell at the
     /// wrong score, so the partial alignment can be empty, invalid, or differ
-    /// between memory modes (HPCBio/wfa2lib-rs#22). Fixed by
-    /// [`crate::aligner::Compat::Corrected`].
+    /// between memory modes (HPCBio/wfa2lib-rs#22). With `match == 0`, C's
+    /// score makes the start the best cell (HPCBio/wfa2lib-rs#55). Both fixed
+    /// by [`crate::aligner::Compat::Corrected`].
     ZDrop {
         zdrop: i32,
         steps_between_cutoffs: i32,
@@ -122,7 +126,8 @@ pub fn wf_distance_end2end(offset: WfOffset, k: i32, plen: i32, tlen: i32) -> i3
 /// Returns `true` if alignment should be terminated (z-drop only); the
 /// best-scoring cell is then in `state.max_sw_score_{k,offset}` (reached at
 /// score `state.max_wf_score`). Modifies `wf`'s lo/hi bounds in-place.
-/// `wf_match` is the wavefront match penalty (`<= 0`).
+/// `swg_match` is the Smith-Waterman match score X-drop and Z-drop use
+/// (see [`swg_match`]).
 pub fn heuristic_cutoff(
     strategy: &HeuristicStrategy,
     state: &mut HeuristicState,
@@ -131,7 +136,7 @@ pub fn heuristic_cutoff(
     distances_base_k: i32,
     pattern_length: i32,
     text_length: i32,
-    wf_match: i32,
+    swg_match: i32,
     score: i32,
 ) -> bool {
     if wf.lo > wf.hi {
@@ -174,7 +179,7 @@ pub fn heuristic_cutoff(
                 wf,
                 distances,
                 distances_base_k,
-                wf_match,
+                swg_match,
                 score,
                 *xdrop,
                 *steps_between_cutoffs,
@@ -189,7 +194,7 @@ pub fn heuristic_cutoff(
             wf,
             distances,
             distances_base_k,
-            wf_match,
+            swg_match,
             score,
             *zdrop,
             *steps_between_cutoffs,
@@ -371,7 +376,7 @@ fn xdrop_cutoff(
     wf: &mut Wavefront,
     sw_scores: &mut [WfOffset],
     sw_base_k: i32,
-    wf_match: i32,
+    swg_match: i32,
     wf_score: i32,
     xdrop: i32,
     steps_between_cutoffs: i32,
@@ -380,7 +385,7 @@ fn xdrop_cutoff(
         return;
     }
     let (cmax_sw_score, cmax_k, _) =
-        compute_sw_scores(wf, sw_scores, sw_base_k, wf_match, wf_score);
+        compute_sw_scores(wf, sw_scores, sw_base_k, swg_match, wf_score);
     if state.max_sw_score_k != DPMATRIX_DIAGONAL_NULL {
         let max_sw_score = state.max_sw_score;
         let drops = |k: i32| max_sw_score - sw_scores[(k - sw_base_k) as usize] >= xdrop;
@@ -417,7 +422,7 @@ fn zdrop_cutoff(
     wf: &mut Wavefront,
     sw_scores: &mut [WfOffset],
     sw_base_k: i32,
-    wf_match: i32,
+    swg_match: i32,
     wf_score: i32,
     zdrop: i32,
     steps_between_cutoffs: i32,
@@ -426,7 +431,7 @@ fn zdrop_cutoff(
         return false;
     }
     let (cmax_sw_score, cmax_k, cmax_offset) =
-        compute_sw_scores(wf, sw_scores, sw_base_k, wf_match, wf_score);
+        compute_sw_scores(wf, sw_scores, sw_base_k, swg_match, wf_score);
     if state.max_sw_score_k == DPMATRIX_DIAGONAL_NULL || cmax_sw_score > state.max_sw_score {
         state.max_sw_score = cmax_sw_score;
         state.max_wf_score = wf_score;
@@ -439,18 +444,30 @@ fn zdrop_cutoff(
     false
 }
 
+/// Smith-Waterman match score for X-drop and Z-drop (C's `swg_match`):
+/// `-wf_match`, and for `wf_match == 0` a stand-in. C uses -1, so making
+/// progress lowers the score: the best Z-drop cell is the start, and X-drop
+/// prunes the diagonals that progress most. C's stand-in was +1 until
+/// 51fb1aa flipped its sign; corrected mode uses +1 (HPCBio/wfa2lib-rs#55).
+pub fn swg_match(wf_match: i32, compat: Compat) -> i32 {
+    match (wf_match, compat) {
+        (0, Compat::C) => -1,
+        (0, Compat::Corrected) => 1,
+        _ => -wf_match,
+    }
+}
+
 /// Smith-Waterman score of each cell (C's `wf_heuristic_compute_sw_scores`):
-/// `(swg_match * (v + h) - wf_score) / 2` with `swg_match = -wf_match`, or -1
-/// when `wf_match == 0`. Cells with null offsets are skipped (left unset).
-/// Returns the maximum score with its diagonal and offset.
+/// `(swg_match * (v + h) - wf_score) / 2`. Cells with null offsets are
+/// skipped (left unset). Returns the maximum score with its diagonal and
+/// offset.
 fn compute_sw_scores(
     wf: &Wavefront,
     sw_scores: &mut [WfOffset],
     sw_base_k: i32,
-    wf_match: i32,
+    swg_match: i32,
     wf_score: i32,
 ) -> (i32, i32, WfOffset) {
-    let swg_match = if wf_match != 0 { -wf_match } else { -1 };
     let (mut cmax_sw_score, mut cmax_k, mut cmax_offset) = (i32::MIN, 0, 0);
     for k in wf.lo..=wf.hi {
         let offset = wf.get_offset(k);
@@ -582,7 +599,8 @@ mod tests {
     #[test]
     fn test_compute_sw_scores_c_formula() {
         // C's wf_heuristic_compute_sw_scores: (swg_match * (v + h) - s) / 2 with
-        // swg_match = -match, or -1 when match == 0; null offsets skipped.
+        // swg_match = -match, or -1 when match == 0 (+1 corrected); null
+        // offsets skipped.
         let mut wf = Wavefront::allocate(11, false);
         wf.init(-5, 5);
         wf.set_limits(-1, 1);
@@ -590,11 +608,14 @@ mod tests {
         wf.set_offset(0, 6); // v = 6, h = 6
         wf.set_offset(1, OFFSET_NULL);
         let mut sw = vec![0; 11];
-        let (max, k, off) = compute_sw_scores(&wf, &mut sw, -5, -3, 10);
+        let (max, k, off) = compute_sw_scores(&wf, &mut sw, -5, swg_match(-3, Compat::C), 10);
         assert_eq!(sw[(-1 + 5) as usize], (3 * 9 - 10) / 2);
         assert_eq!((max, k, off), ((3 * 12 - 10) / 2, 0, 6));
-        let (max, _, _) = compute_sw_scores(&wf, &mut sw, -5, 0, 10);
+        let (max, _, _) = compute_sw_scores(&wf, &mut sw, -5, swg_match(0, Compat::C), 10);
         assert_eq!(max, (-9 - 10) / 2); // match == 0: swg_match = -1
+        // Corrected mode: +1, so the cell that progressed most is the best.
+        let (max, k, _) = compute_sw_scores(&wf, &mut sw, -5, swg_match(0, Compat::Corrected), 10);
+        assert_eq!((max, k), ((12 - 10) / 2, 0));
     }
 
     #[test]

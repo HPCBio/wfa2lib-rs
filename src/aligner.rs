@@ -91,6 +91,12 @@ pub enum MemoryMode {
 ///   keeping its backtrace for med/low, so all memory modes give a valid
 ///   partial alignment with the same score.
 ///
+/// - **X-drop and Z-drop with `match == 0`** (HPCBio/wfa2lib-rs#55): their
+///   Smith-Waterman score needs a stand-in match score, and C's is -1, so
+///   progress lowers the score: X-drop prunes the diagonals that progress
+///   most (abandoning most divergent pairs), and Z-drop's best cell is the
+///   start. Corrected mode uses +1, as C did before its commit 51fb1aa.
+///
 /// Otherwise, gap-linear/affine/affine2p with `match == 0` give identical
 /// results in both modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1349,7 +1355,7 @@ impl<const N: usize> WavefrontAligner<N> {
             distances_base_k,
             plen,
             tlen,
-            self.penalties.match_,
+            heuristic::swg_match(self.penalties.match_, self.compat),
             score,
         );
 
