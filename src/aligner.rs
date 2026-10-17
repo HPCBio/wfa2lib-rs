@@ -1712,24 +1712,6 @@ impl<const N: usize> WavefrontAligner<N> {
         // Allocation range (also resizes the null/victim wavefronts)
         let (alloc_lo, alloc_hi) = self.output_alloc_range(score, lo, hi);
 
-        // Prefetch input wavefront offset arrays into L1 cache.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-            macro_rules! prefetch_wf {
-                ($ptr:expr, $lo:expr) => {
-                    if !$ptr.is_null() {
-                        let base = (*$ptr).centered_offsets.offset($lo as isize) as *const i8;
-                        _mm_prefetch(base, _MM_HINT_T0);
-                        _mm_prefetch(base.add(64), _MM_HINT_T0);
-                    }
-                }
-            }
-            prefetch_wf!(ptr_m_misms, lo);
-            prefetch_wf!(ptr_m_open, lo);
-            prefetch_wf!(ptr_i1_ext, lo);
-            prefetch_wf!(ptr_d1_ext, lo);
-        }
 
         // Initialize input wavefront ends using pointers (no slab re-lookup)
         unsafe {
@@ -1953,28 +1935,6 @@ impl<const N: usize> WavefrontAligner<N> {
         // Allocation range (also resizes the null/victim wavefronts)
         let (alloc_lo, alloc_hi) = self.output_alloc_range(score, lo, hi);
 
-        // Prefetch input wavefront offset arrays into L1 cache.
-        // These prefetches overlap with the init_ends work below, hiding L1 miss latency.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-            macro_rules! prefetch_wf {
-                ($ptr:expr, $lo:expr) => {
-                    if !$ptr.is_null() {
-                        let base = (*$ptr).centered_offsets.offset($lo as isize) as *const i8;
-                        _mm_prefetch(base, _MM_HINT_T0);
-                        _mm_prefetch(base.add(64), _MM_HINT_T0);
-                    }
-                }
-            }
-            prefetch_wf!(ptr_m_misms, lo);
-            prefetch_wf!(ptr_m_open1, lo);
-            prefetch_wf!(ptr_m_open2, lo);
-            prefetch_wf!(ptr_i1_ext, lo);
-            prefetch_wf!(ptr_i2_ext, lo);
-            prefetch_wf!(ptr_d1_ext, lo);
-            prefetch_wf!(ptr_d2_ext, lo);
-        }
 
         // Initialize input wavefront ends using pointers (no slab re-lookup)
         unsafe {

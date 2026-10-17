@@ -477,3 +477,42 @@ extend.
   and a scan that skips the rest of a chunk.
 - To confirm on x86 with `bench/sweep.py` (expect affine2p ultralow near or
   below C-native).
+
+## 2026-10-17: x86 prefetches: claim output lines instead (HPCBio/wfa2lib-rs#31)
+
+After #49, the Xeon Gold 6150 (Skylake-SP) was the only machine where
+gap-affine 2-piece high-memory CIGAR wasn't faster than C (1.01×; banded 1.28×,
+against 0.75–0.77× on the EPYC 7713). Rust's CIGAR-minus-score overhead there
+was +32% against +8% for C, and +8–10% for Rust on the M2 and EPYC.
+
+- `perf` (`l2_rqsts.rfo_miss`, `resource_stalls.sb`, sampled per instruction):
+  the store buffer was full for 4.67 G cycles against C's 0.38 G, about 60%
+  of them on the AVX2 affine2p kernel's five output stores. Those stores
+  missed L2 for ownership (RFO) 158 M times against about 88 M in C's kernel.
+  In high memory the outputs are fresh lines.
+- Ruled out by A/B or counters: per-component victim outputs (no change),
+  split stores (12% vs C's 10%), slab cache coloring (helps only banded on
+  the Xeon, costs up to 4% on the EPYC), and the input prefetches (not the
+  cause, but they didn't help either).
+- Fix: drop all x86 input prefetches (the hardware prefetcher covers these
+  sequential streams) and issue `PREFETCHW` on the five affine2p outputs,
+  32 diagonals (two lines) ahead.
+
+A/B at `45f419e`, best of 3, time relative to the unchanged build, with
+output identical in all cases:
+
+| Case | Xeon: 32 | Xeon: 64 | Xeon: 128 | EPYC: 32 |
+|---|---|---|---|---|
+| affine2p CIGAR (m1k_5) | **0.88** | 0.98 | 1.08 | 0.96 |
+| affine2p banded CIGAR (m1k_20) | **0.65** | 0.91 | 1.05 | 1.03 |
+| affine2p CIGAR (l10k_5) | **0.89** | 0.92 | 0.96 | 1.00 |
+| affine2p score | **0.93** | 0.95 | 0.97 | 0.94 |
+| affine2p BiWFA | **0.95** | 0.98 | 1.03 | 0.96 |
+| gap-affine CIGAR / score | 0.98 / 0.98 | | | 1.01 / 0.97 |
+| edit (control) | 0.99 | | | 0.99 |
+
+- On the Xeon, store-buffer stalls on affine2p CIGAR dropped from 4.63 G to
+  0.43 G cycles, about C's level. Against C: affine2p CIGAR 1.01× → 0.89×,
+  banded 1.28× → 0.83×, 10 kb 0.97× → 0.87×.
+- On the EPYC it is about the same as just removing the prefetches (2–6%
+  faster on most affine2p cases, the rest within noise). ARM is unchanged.
