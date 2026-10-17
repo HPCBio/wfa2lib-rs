@@ -158,3 +158,30 @@ fn issue_22_corrected_survives_compaction() {
         );
     }
 }
+
+/// BiWFA: a base sub-alignment that Z-drops is backtraced like the
+/// unidirectional end, in M from the best cell's score (C: the current
+/// score, in the sub-problem's end component). `long.seq` pair 21 with Z-drop
+/// `50,10`: invalid in C, valid in corrected mode.
+#[test]
+fn issue_22_biwfa() {
+    let data = std::fs::read_to_string("tests/data/issue22_zdrop_biwfa.seq").unwrap();
+    let mut lines = data.lines();
+    let pat = lines.next().unwrap().trim_start_matches('>').as_bytes();
+    let txt = lines.next().unwrap().trim_start_matches('<').as_bytes();
+    let align = |compat: Compat| {
+        let mut a = WavefrontAligner::<3>::new(WavefrontPenalties::new_affine(PEN));
+        a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+        a.set_heuristic(HeuristicStrategy::ZDrop {
+            zdrop: 50,
+            steps_between_cutoffs: 10,
+        });
+        a.set_compat(compat);
+        a.align_biwfa(pat, txt);
+        a.cigar().clone()
+    };
+    assert!(!valid_prefix(&align(Compat::C), pat, txt));
+    let cigar = align(Compat::Corrected);
+    assert!(!cigar.operations_slice().is_empty());
+    assert!(valid_prefix(&cigar, pat, txt));
+}

@@ -515,9 +515,17 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
 - **Note:** with `match == 0`, C's Z-drop score makes the start the best
   cell, so this fix alone leaves most such partial alignments empty; 14f
   fixes that.
+- **BiWFA:** a base sub-alignment that Z-drops is backtraced the same way
+  in C (current score), and also starts in the sub-problem's end component,
+  which can be I/D; the best cell is an M cell. Corrected mode starts in M
+  at the best cell's score. BiWFA Z-drop `20,1` / `50,10` / `100,5` ×
+  default and `-3,5,3,2` × {`wfa.utest.seq`, `long.seq`}: no invalid
+  CIGARs (C: up to 64), and with default penalties far fewer empty results
+  (`long.seq` `50,10`: 0, C: 300).
 - **Tests:** `tests/corrected_zdrop.rs` (`long.seq` pair 1,
   `tests/data/issue22_zdrop.seq`; a generated pair whose Z-drop comes after
-  two compaction probes, which fails without the pin).
+  two compaction probes, which fails without the pin; BiWFA on `long.seq`
+  pair 21, `tests/data/issue22_zdrop_biwfa.seq`).
 
 ### 14f. X-drop/Z-drop with match == 0: sign-flipped SW score (HPCBio/wfa2lib-rs#55)
 

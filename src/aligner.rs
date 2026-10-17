@@ -2804,7 +2804,14 @@ impl<const N: usize> WavefrontAligner<N> {
                 Ok(score)
             }
             AlignStatus::EndUnreachable if pos.offset != OFFSET_NULL => {
-                base.backtrace_components(score, pos.k, pos.offset, component_begin, component_end);
+                // C starts at the current score, in `component_end`;
+                // corrected mode at the best cell's score, in M (the cell is
+                // an M cell; HPCBio/wfa2lib-rs#22, as `backtrace_zdrop_end`).
+                if base.compat == Compat::C {
+                    base.backtrace_components(score, pos.k, pos.offset, component_begin, component_end);
+                } else {
+                    base.backtrace_components(pos.score, pos.k, pos.offset, component_begin, ComponentType::M);
+                }
                 base.maxtrim_cigar();
                 Err(BiStatus::Unattainable)
             }
