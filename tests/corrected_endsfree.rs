@@ -576,8 +576,8 @@ fn edit_pen(kind: usize) -> Pen {
     Pen::linear(0, if kind == 3 { 1 } else { 1000 }, 1)
 }
 
-/// HPCBio/wfa2lib-rs#18 (Marco-Sola-Lab/WFA2-lib#142): edit/indel ends-free with
-/// begin gaps returns an invalid CIGAR in C; corrected mode is valid.
+/// HPCBio/wfa2lib-rs#18: edit/indel ends-free with begin gaps returned an
+/// invalid CIGAR in C before Marco-Sola-Lab/WFA2-lib#144; now valid in both modes.
 #[test]
 fn issue_18_edit_begin_gaps() {
     let (pat, txt) = (b"ACGTTCGTACGA".as_slice(), b"CCACGTACGTACGA".as_slice());
@@ -586,8 +586,7 @@ fn issue_18_edit_begin_gaps() {
     a.set_alignment_scope(AlignmentScope::ComputeAlignment);
     a.set_alignment_free_ends(ends.0, ends.1, ends.2, ends.3);
     assert_eq!(a.align_endsfree(pat, txt), 1);
-    assert_eq!(a.cigar().to_string_rle(true), "2I12M");
-    assert!(a.cigar().check_alignment(pat, txt).is_err());
+    a.cigar().check_alignment(pat, txt).unwrap();
     check(3, &edit_pen(3), pat, txt, ends);
 }
 
