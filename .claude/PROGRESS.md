@@ -63,7 +63,9 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 ### Known issues kept for C parity
 
 - HPCBio/wfa2lib-rs#21: X-drop with `steps_between_cutoffs > 1` returns invalid
-  CIGARs (C high-memory backtrace over pruned diagonals; C's `med` is valid).
+  CIGARs (C's high-memory backtrace reads wavefronts trimmed to empty; C's
+  `med` is valid). **Fixed in corrected mode** (`Compat::Corrected`;
+  FIXED_BUGS 14d).
 - HPCBio/wfa2lib-rs#22: Z-drop results differ between C's high-memory and `med`
   modes. Root cause: in `med`/`low`, C backtraces from the end diagonal at
   the current score, often a dead cell whose chain comes from uninitialized
@@ -185,3 +187,6 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - **2026-10-17:** C `C_COMMIT` 3282f83 → 6176f94. Marco-Sola-Lab/WFA2-lib#144
   (our fix for Marco-Sola-Lab/WFA2-lib#142) merged upstream, so the edit/indel
   begin-gap fix (HPCBio/wfa2lib-rs#18) now applies in default C mode too.
+- **2026-10-17:** HPCBio/wfa2lib-rs#21 fixed in corrected mode: a wavefront
+  trimmed empty by a heuristic cutoff is null for the backtrace too, as for
+  compute. X-drop with steps > 1 now gives valid CIGARs; scores unchanged.

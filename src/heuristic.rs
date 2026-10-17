@@ -24,10 +24,10 @@ pub enum HeuristicStrategy {
     /// or more below the best score seen, every `steps_between_cutoffs` steps.
     ///
     /// **Known issue (parity with C WFA2-lib):** with `steps_between_cutoffs > 1`
-    /// the CIGAR can be invalid (C's backtrace reads diagonals pruned after
-    /// their last extension). Scores are unaffected, and
-    /// `steps_between_cutoffs == 1` produces valid CIGARs. Use
-    /// [`crate::cigar::Cigar::check_alignment`] if this matters.
+    /// the CIGAR can be invalid (C's backtrace reads wavefronts the cutoff
+    /// trimmed to empty, HPCBio/wfa2lib-rs#21). Scores are unaffected, and
+    /// `steps_between_cutoffs == 1` produces valid CIGARs. Fixed by
+    /// [`crate::aligner::Compat::Corrected`].
     XDrop {
         xdrop: i32,
         steps_between_cutoffs: i32,
