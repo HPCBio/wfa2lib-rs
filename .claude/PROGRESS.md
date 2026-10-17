@@ -172,4 +172,10 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   breakpoint checks were 73% of affine2p BiWFA time and scalar except the
   NEON M scan. affine2p ultralow is now 0.38–0.52× C on ARM (was ~1.0×);
   output unchanged.
+- **2026-10-17:** x86 prefetches (HPCBio/wfa2lib-rs#31): on the Xeon
+  (Skylake-SP), affine2p high-memory CIGAR waited on ownership requests for
+  its fresh output lines (store buffer full). The input prefetches are removed
+  and the affine2p kernel issues `PREFETCHW` on its outputs. Xeon: 5–35%
+  faster on affine2p high memory, now 0.83–0.89× C; EPYC slightly faster;
+  output unchanged.
 

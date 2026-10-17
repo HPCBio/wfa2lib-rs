@@ -248,15 +248,8 @@ unsafe fn compute_affine_idm_avx2(
             );
             let avx_end = lo + (count & !7);
 
-            const PF_DIST: isize = 16;
 
             while k < avx_end {
-                // Prefetch next chunk of all 4 input arrays
-                _mm_prefetch(m_open.offset(k as isize + PF_DIST) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(i1_ext.offset(k as isize + PF_DIST) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(d1_ext.offset(k as isize + PF_DIST) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(m_misms.offset(k as isize + PF_DIST) as *const i8, _MM_HINT_T0);
-
                 // I1: load m_open[k-1] and i1_ext[k-1]
                 let v_m_open_km1 = _mm256_loadu_si256(m_open.offset(k as isize - 1) as *const __m256i);
                 let v_i1_ext_km1 = _mm256_loadu_si256(i1_ext.offset(k as isize - 1) as *const __m256i);
