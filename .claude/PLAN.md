@@ -42,6 +42,7 @@ src/
 tests/
   cli_output.rs                -- CLI output tests (expected outputs from C)
   corrected_endsfree.rs        -- Compat::Corrected ends-free vs a DP oracle
+  corrected_xdrop.rs           -- Compat::Corrected X-drop CIGAR validity (#21)
   test_vs_reference.rs         -- library vs C reference outputs
   wfa_utest.sh                 -- stock C unit tests on the Rust CLI
   data/                        -- CLI test fixtures

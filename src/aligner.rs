@@ -72,8 +72,17 @@ pub enum MemoryMode {
 ///   lengths gives its real score. Also applies to extension alignment.
 ///   It can take more steps than C (up to the optimal score).
 ///
-/// Gap-linear/affine/affine2p with `match == 0` give identical results in
-/// both modes.
+/// - **X-drop with `steps_between_cutoffs > 1`** (HPCBio/wfa2lib-rs#21): C's
+///   high-memory backtrace can return an invalid CIGAR. A cutoff can trim a
+///   wavefront to empty, and compute then reads it as null, but the
+///   backtrace still reads its stale offsets and can take a source that
+///   compute never used. Corrected mode empties such a wavefront's
+///   initialized range too, so the backtrace sees what compute saw. Scores
+///   are unchanged. This applies to any heuristic that trims a wavefront
+///   to empty.
+///
+/// Otherwise, gap-linear/affine/affine2p with `match == 0` give identical
+/// results in both modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Compat {
     /// Output identical to C WFA2-lib, including its known bugs (the default).
@@ -1328,8 +1337,16 @@ impl<const N: usize> WavefrontAligner<N> {
         if lo_base > hi_base || (wf.lo == lo_base && wf.hi == hi_base) {
             return false;
         }
+        // Corrected mode: a wavefront trimmed empty is null for the backtrace
+        // too. Compute reads it as the null wavefront, but C's backtrace still
+        // reads its stale offsets and can take a source compute never used,
+        // giving an invalid CIGAR (HPCBio/wfa2lib-rs#21).
+        let corrected = self.compat == Compat::Corrected;
         if wf.lo > wf.hi {
             wf.null = true;
+            if corrected {
+                wf.clear_init_range();
+            }
         }
 
         // Propagate narrowed M-wavefront bounds to I/D wavefronts
@@ -1343,7 +1360,7 @@ impl<const N: usize> WavefrontAligner<N> {
                     unsafe {
                         if m_lo > (*i1_ptr).lo { (*i1_ptr).lo = m_lo; }
                         if m_hi < (*i1_ptr).hi { (*i1_ptr).hi = m_hi; }
-                        if (*i1_ptr).lo > (*i1_ptr).hi { (*i1_ptr).null = true; }
+                        if (*i1_ptr).lo > (*i1_ptr).hi { (*i1_ptr).null = true; if corrected { (*i1_ptr).clear_init_range(); } }
                     }
                 }
 
@@ -1352,7 +1369,7 @@ impl<const N: usize> WavefrontAligner<N> {
                     unsafe {
                         if m_lo > (*d1_ptr).lo { (*d1_ptr).lo = m_lo; }
                         if m_hi < (*d1_ptr).hi { (*d1_ptr).hi = m_hi; }
-                        if (*d1_ptr).lo > (*d1_ptr).hi { (*d1_ptr).null = true; }
+                        if (*d1_ptr).lo > (*d1_ptr).hi { (*d1_ptr).null = true; if corrected { (*d1_ptr).clear_init_range(); } }
                     }
                 }
             }
@@ -1370,7 +1387,7 @@ impl<const N: usize> WavefrontAligner<N> {
                         unsafe {
                             if m_lo > (*ptr).lo { (*ptr).lo = m_lo; }
                             if m_hi < (*ptr).hi { (*ptr).hi = m_hi; }
-                            if (*ptr).lo > (*ptr).hi { (*ptr).null = true; }
+                            if (*ptr).lo > (*ptr).hi { (*ptr).null = true; if corrected { (*ptr).clear_init_range(); } }
                         }
                     }
                 }

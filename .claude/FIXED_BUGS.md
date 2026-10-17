@@ -457,6 +457,35 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
 - **Tests:** `issue_18_edit_begin_gaps` (now checks C mode), `edit_indel_random_against_oracle`
   (3000 cases vs the DP oracle, all memory modes).
 
+### 14d. X-drop with steps > 1: invalid CIGARs (HPCBio/wfa2lib-rs#21)
+
+- **C bug:** with `steps_between_cutoffs > 1` only every n-th wavefront is
+  pruned, and a cutoff can trim it to empty (`lo > hi`, `null`). Compute
+  reads an empty input as the null wavefront, but its offsets stay within
+  the initialized range, and the high-memory backtrace bounds its reads by
+  that range only. So it can take a stale source that compute never used.
+  If that source's offset exceeds the current cell's, the match run is
+  negative, and C moves the CIGAR write position forward over earlier
+  operations (e.g. `wfa.utest.seq` pair 201, affine `50,10`: at score 506,
+  k = 6, offset 547, the mismatch source M(502) was trimmed empty but still
+  holds 548). C's `med` piggyback backtrace records the real sources, so it
+  is valid.
+- **Fix (corrected mode):** when a cutoff trims M (or I/D, by equating) to
+  empty, also empty its initialized range (`Wavefront::clear_init_range`),
+  so the backtrace reads it as null, as compute does. Scores are unchanged
+  in all modes.
+- **Result:** X-drop `50,10` / `100,5` × affine / linear / affine2p ×
+  {`wfa.utest.seq`, `long.seq`}: every non-empty CIGAR is valid (C mode:
+  e.g. affine `100,5` on `long.seq` 0/300 valid). Score-only output
+  identical in both modes.
+- **Not a bug:** with pruning, the WFA path can open a gap right after
+  another (I-open, then I-open with no match between), when the extension
+  source was pruned. The CIGAR merges them into one gap, so it rescores
+  below the WFA score (never above): e.g. pair 298, affine `100,5`, 242 vs
+  248. C's valid CIGARs show the same (affine2p `50,10`: 5/305 pairs).
+- **Tests:** `tests/corrected_xdrop.rs` (pair 201,
+  `tests/data/issue21_xdrop.seq`, all three gap metrics).
+
 ## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)
 
 - **Symptom:** a fresh aligner given an empty pattern and an empty text,

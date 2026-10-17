@@ -349,6 +349,14 @@ impl Wavefront {
         }
     }
 
+    /// Empty the initialized range, so the backtrace reads no cell of this
+    /// wavefront (corrected mode, for one a heuristic trimmed empty:
+    /// HPCBio/wfa2lib-rs#21).
+    pub(crate) fn clear_init_range(&mut self) {
+        self.wf_elements_init_min = 1;
+        self.wf_elements_init_max = 0;
+    }
+
     /// Extend the written range to cover `[lo, hi]`.
     #[inline(always)]
     pub(crate) fn mark_written(&mut self, lo: i32, hi: i32) {
