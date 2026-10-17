@@ -567,6 +567,40 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   optimal (C mode: 0–240).
 - **Tests:** `tests/corrected_xdrop.rs` checks BiWFA too.
 
+### 14h. Score-only output without an alignment (HPCBio/wfa2lib-rs#23)
+
+- **C bug:** in score-only mode C always prints a score, even when there is
+  no alignment (in CIGAR mode it prints `-1  -`):
+  - unreachable (banded, X-drop) with a match reward: the classic score is
+    evaluated at the unset end position (`k = INT_MAX`,
+    `offset = OFFSET_NULL`); `v = offset - k` is a signed overflow and wraps
+    to `v + h == 1`, giving `(swg_match - score) / 2`. E.g. `wfa.utest.seq`
+    pair 262, affine `-3,5,3,2`, X-drop `20,1`: `-113`;
+  - unreachable with `match == 0`: the negated score where it gave up;
+  - a failed BiWFA score search: `cigar_clear`'s `INT32_MIN`.
+  (The example in #23, pair 101, is a reachable pair: off by one.)
+- **Rust:** the library returns the WFA score with an `EndUnreachable` /
+  `Partial` status (its score is documented as meaningless then); only the
+  CLI converts it, reproducing C. So the fix is in `align_benchmark`.
+- **Fix (corrected mode, CLI):** print `-1` in score-only mode when the
+  alignment ended unreachable with no Z-drop cell, or BiWFA's score search
+  failed. Z-drop results keep their score (a real cell).
+- **Result:** banded-static and X-drop no-alignment pairs print `-1`,
+  unidirectional and BiWFA; only score-only output changes. On the sampled
+  drop/banded configurations, every `-1` matches a CIGAR-mode `-1  -`,
+  except as noted below.
+- **Left as is:**
+  - BiWFA score-only has no partial result: when its search Z-drops it
+    prints `-1` (C: `INT32_MIN`), though CIGAR mode returns the partial
+    alignment (e.g. utest affine `-3,5,3,2`, Z-drop `100,5`: 7/305 pairs).
+  - BiWFA's score search can succeed where its CIGAR search fails in a
+    sub-problem (independent cutoffs).
+  - A Z-drop whose CIGAR max-trims to empty keeps its score.
+  - With a match reward, `-1` can also be a real score (e.g. utest pair
+    281, 10 × 10 bp, extension), as in C's CIGAR mode.
+- **Tests:** `unreachable_score_only_corrected_prints_minus_one`
+  (`tests/cli_output.rs`, `tests/data/issue23_unreachable.seq`).
+
 ## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)
 
 - **Symptom:** a fresh aligner given an empty pattern and an empty text,

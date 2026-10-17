@@ -79,6 +79,8 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   mode** (FIXED_BUGS 14f).
 - HPCBio/wfa2lib-rs#23: score-only score for unreachable alignments (match < 0)
   is evaluated at C's unset end position (signed overflow); reproduced.
+  **Fixed in corrected mode** in the CLI, which prints -1 for every
+  score-only result without an alignment (FIXED_BUGS 14h).
 - HPCBio/wfa2lib-rs#24: edit/indel + banded-static never terminates in C;
   Rust deliberately terminates (divergence).
 - HPCBio/wfa2lib-rs#34: C's ends-free/extension results depend on the CPU.
@@ -206,3 +208,6 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   300/300 optimal on `long.seq`.
 - **2026-10-17:** corrected mode now reaches BiWFA's sub-aligners (a Rust bug
   from #54, FIXED_BUGS 14g): the #21 and #55 fixes apply under BiWFA too.
+- **2026-10-17:** HPCBio/wfa2lib-rs#23 fixed in corrected mode (CLI): score-only
+  output without an alignment is -1, as in CIGAR mode, instead of C's
+  overflowed, give-up or INT32_MIN scores.
