@@ -540,6 +540,25 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   `long.seq`: the full optimal alignment), high = med.
 - **Tests:** `test_compute_sw_scores_c_formula` (both stand-ins).
 
+### 14g. Corrected mode didn't reach BiWFA's sub-aligners (Rust bug)
+
+- **Symptom:** under BiWFA, corrected mode gave C's output: the #21 fix
+  (14d) and the #55 fix (14f) never applied. #54's "BiWFA identical to C"
+  in corrected mode was this, not parity. E.g. BiWFA X-drop `50,10`,
+  default penalties, `long.seq`: 107 invalid CIGARs and 2/300 optimal
+  scores in both modes.
+- **Root cause:** `take_biwfa_subs` hands out the forward, reverse and base
+  sub-aligners, which run the heuristics and the base backtrace, but they
+  were created with `Compat::C` and never given the parent's mode (only its
+  heuristic).
+- **Fix:** `take_biwfa_subs` sets their `compat` to the parent's on every
+  call (`set_compat` can change it between alignments).
+- **Result:** BiWFA X-drop `50,10` / `100,5` / `20,2`, default and
+  `-3,5,3,2`, `wfa.utest.seq` and `long.seq`: no invalid CIGARs in
+  corrected mode (C mode: up to 213/300); with default penalties 168–303
+  optimal (C mode: 0–240).
+- **Tests:** `tests/corrected_xdrop.rs` checks BiWFA too.
+
 ## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)
 
 - **Symptom:** a fresh aligner given an empty pattern and an empty text,

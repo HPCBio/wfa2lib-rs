@@ -2354,11 +2354,17 @@ impl<const N: usize> WavefrontAligner<N> {
             b.alignment_scope = AlignmentScope::ComputeAlignment;
             self.biwfa_base = Some(Box::new(b));
         }
-        (
+        let (mut fwd, mut rev, mut base) = (
             self.biwfa_fwd.take().unwrap(),
             self.biwfa_rev.take().unwrap(),
             self.biwfa_base.take().unwrap(),
-        )
+        );
+        // The sub-aligners run the heuristics and the base backtrace, so
+        // they follow this aligner's mode (set_compat can change it later).
+        fwd.compat = self.compat;
+        rev.compat = self.compat;
+        base.compat = self.compat;
+        (fwd, rev, base)
     }
 
     /// End-to-end alignment using a custom match function (Lambda mode).

@@ -204,3 +204,5 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   `match == 0`, C's X-drop/Z-drop score has its sign flipped since 51fb1aa.
   Corrected mode uses +1: X-drop with default penalties goes from ~0/300 to
   300/300 optimal on `long.seq`.
+- **2026-10-17:** corrected mode now reaches BiWFA's sub-aligners (a Rust bug
+  from #54, FIXED_BUGS 14g): the #21 and #55 fixes apply under BiWFA too.

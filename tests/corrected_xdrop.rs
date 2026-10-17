@@ -31,11 +31,13 @@ fn pair() -> (Vec<u8>, Vec<u8>) {
     (pat, txt)
 }
 
-/// Align with X-drop in the given mode; returns the score and the CIGAR.
+/// Align with X-drop in the given mode (BiWFA if `biwfa`); returns the
+/// score and the CIGAR.
 fn run<const N: usize>(
     penalties: WavefrontPenalties,
     xdrop: (i32, i32),
     compat: Compat,
+    biwfa: bool,
     pat: &[u8],
     txt: &[u8],
 ) -> (i32, Cigar) {
@@ -46,24 +48,45 @@ fn run<const N: usize>(
         steps_between_cutoffs: xdrop.1,
     });
     a.set_compat(compat);
-    let score = a.align_end2end(pat, txt);
+    let score = if biwfa {
+        a.align_biwfa(pat, txt)
+    } else {
+        a.align_end2end(pat, txt)
+    };
     (score, a.cigar().clone())
 }
 
-/// C mode reproduces the invalid CIGAR; corrected mode is valid, with the
+/// C mode reproduces the invalid CIGAR, unidirectional and BiWFA (whose
+/// sub-aligners follow the parent's mode); corrected mode is valid, with the
 /// same score. The CIGAR scores at least as well as that score says (it can
 /// do better): with pruning, the WFA path can open a gap right after
 /// another, which the CIGAR merges into one (as in C's valid CIGARs).
 fn check<const N: usize>(penalties: WavefrontPenalties, rescore: impl Fn(&Cigar) -> i32) {
     let xdrop = (20, 2);
     let (pat, txt) = pair();
-    let (c_score, c_cigar) = run::<N>(penalties.clone(), xdrop, Compat::C, &pat, &txt);
-    assert!(c_cigar.check_alignment(&pat, &txt).is_err());
-    let (score, cigar) = run::<N>(penalties.clone(), xdrop, Compat::Corrected, &pat, &txt);
-    assert_eq!(score, c_score);
-    cigar.check_alignment(&pat, &txt).unwrap();
-    let sw = penalties.wf_score_to_sw_score(pat.len() as i32, txt.len() as i32, score);
-    assert!(rescore(&cigar) >= sw, "{} < {sw}", rescore(&cigar));
+    for biwfa in [false, true] {
+        let (c_score, c_cigar) = run::<N>(penalties.clone(), xdrop, Compat::C, biwfa, &pat, &txt);
+        assert!(
+            c_cigar.check_alignment(&pat, &txt).is_err(),
+            "biwfa={biwfa}"
+        );
+        let (score, cigar) = run::<N>(
+            penalties.clone(),
+            xdrop,
+            Compat::Corrected,
+            biwfa,
+            &pat,
+            &txt,
+        );
+        assert_eq!(score, c_score, "biwfa={biwfa}");
+        cigar.check_alignment(&pat, &txt).unwrap();
+        let sw = penalties.wf_score_to_sw_score(pat.len() as i32, txt.len() as i32, score);
+        assert!(
+            rescore(&cigar) >= sw,
+            "biwfa={biwfa}: {} < {sw}",
+            rescore(&cigar)
+        );
+    }
 }
 
 #[test]
