@@ -483,8 +483,89 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   source was pruned. The CIGAR merges them into one gap, so it rescores
   below the WFA score (never above): e.g. pair 298, affine `100,5`, 242 vs
   248. C's valid CIGARs show the same (affine2p `50,10`: 5/305 pairs).
-- **Tests:** `tests/corrected_xdrop.rs` (pair 201,
-  `tests/data/issue21_xdrop.seq`, all three gap metrics).
+- **Tests:** `tests/corrected_xdrop.rs` (all three gap metrics). First pair
+  201 with default penalties; since 14f changes X-drop's scores at
+  `match == 0`, pair 305 (`tests/data/issue21_xdrop.seq`) with match-reward
+  penalties and X-drop `20,2`.
+
+### 14e. Z-drop ends backtraced at the wrong score (HPCBio/wfa2lib-rs#22)
+
+- **C bug:** on a Z-drop, `wavefront_unialign_terminate` backtraces the best
+  cell's diagonal and offset (found at `max_wf_score`) starting at the
+  *current* score, where that cell needn't exist.
+  - High memory: the backtrace finds no source, stops, and pads with
+    unchecked `M`s plus leading indels. With default penalties that is
+    usually max-trimmed to empty; with `match < 0` the CIGARs are invalid
+    (e.g. `2I58M` on a 2 kb, 8%-error pair; up to 300/300 invalid on
+    `long.seq`, affine `-3,5,3,2`, Z-drop `100,5`).
+  - Med/low: the cell at the current score is often dead, and its
+    `bt_pcigar/bt_prev` were never initialized (leftovers of earlier
+    alignments in C; zeroes in Rust), so C's high and med results differ and
+    C's med depends on what it aligned before.
+- **Fix (corrected mode):** backtrace the best cell at `max_wf_score`
+  (`backtrace_zdrop_end`): high memory from the stored wavefronts; med/low
+  from the cell's `(pcigar, prev)` kept when it became the best
+  (`zdrop_best_bt`), pinned through buffer compaction (which now pins a
+  slice: the ends-free candidate and the Z-drop cell).
+- **Result:** Z-drop `20,1` / `50,1` / `50,10` / `100,5` × default and
+  `-3,5,3,2` × global / extension / ends-free × {`wfa.utest.seq`,
+  `long.seq`}: every partial CIGAR valid, and high = med except co-optimal
+  ties that score the same (an empty CIGAR vs `1M`/`2M`, score 0). C mode
+  is unchanged.
+- **Note:** with `match == 0`, C's Z-drop score makes the start the best
+  cell, so this fix alone leaves most such partial alignments empty; 14f
+  fixes that.
+- **BiWFA:** a base sub-alignment that Z-drops is backtraced the same way
+  in C (current score), and also starts in the sub-problem's end component,
+  which can be I/D; the best cell is an M cell. Corrected mode starts in M
+  at the best cell's score. BiWFA Z-drop `20,1` / `50,10` / `100,5` ×
+  default and `-3,5,3,2` × {`wfa.utest.seq`, `long.seq`}: no invalid
+  CIGARs (C: up to 64), and with default penalties far fewer empty results
+  (`long.seq` `50,10`: 0, C: 300).
+- **Tests:** `tests/corrected_zdrop.rs` (`long.seq` pair 1,
+  `tests/data/issue22_zdrop.seq`; a generated pair whose Z-drop comes after
+  two compaction probes, which fails without the pin; BiWFA on `long.seq`
+  pair 21, `tests/data/issue22_zdrop_biwfa.seq`).
+
+### 14f. X-drop/Z-drop with match == 0: sign-flipped SW score (HPCBio/wfa2lib-rs#55)
+
+- **C bug:** a regression from 51fb1aa (2023-03-19). X-drop and Z-drop score
+  cells with `(swg_match·(v+h) − wf_score)/2`. Before 51fb1aa, `match == 0`
+  used `(v+h) − wf_score` ("use match-score=1"); since then it is
+  `swg_match = -1`, so making progress lowers the score.
+  - X-drop prunes the diagonals that progress most: with default penalties
+    it abandons nearly every divergent pair (`long.seq`: 0–81 of 300
+    optimal, typically 0).
+  - Z-drop's best cell is the start, so its partial alignment is empty or
+    the leading matches (hidden in C by 14e).
+- **Fix (corrected mode):** `heuristic::swg_match` returns +1 for
+  `match == 0` (C: -1), passed to the heuristics in place of the match
+  penalty. The shared formula keeps the `/2`, so +1 has half the scale of
+  the pre-51fb1aa special case.
+- **Result:** X-drop with default penalties is optimal on 300/300 `long.seq`
+  pairs for affine/linear/affine2p at `50,10` and `100,5` (293–300 at
+  `50,1`); Z-drop gives real partial alignments (e.g. `50,10` on
+  `long.seq`: the full optimal alignment), high = med.
+- **Tests:** `test_compute_sw_scores_c_formula` (both stand-ins).
+
+### 14g. Corrected mode didn't reach BiWFA's sub-aligners (Rust bug)
+
+- **Symptom:** under BiWFA, corrected mode gave C's output: the #21 fix
+  (14d) and the #55 fix (14f) never applied. #54's "BiWFA identical to C"
+  in corrected mode was this, not parity. E.g. BiWFA X-drop `50,10`,
+  default penalties, `long.seq`: 107 invalid CIGARs and 2/300 optimal
+  scores in both modes.
+- **Root cause:** `take_biwfa_subs` hands out the forward, reverse and base
+  sub-aligners, which run the heuristics and the base backtrace, but they
+  were created with `Compat::C` and never given the parent's mode (only its
+  heuristic).
+- **Fix:** `take_biwfa_subs` sets their `compat` to the parent's on every
+  call (`set_compat` can change it between alignments).
+- **Result:** BiWFA X-drop `50,10` / `100,5` / `20,2`, default and
+  `-3,5,3,2`, `wfa.utest.seq` and `long.seq`: no invalid CIGARs in
+  corrected mode (C mode: up to 213/300); with default penalties 168–303
+  optimal (C mode: 0–240).
+- **Tests:** `tests/corrected_xdrop.rs` checks BiWFA too.
 
 ## 15. Empty pattern and text: CIGAR offset underflow (debug panic, HPCBio/wfa2lib-rs#41)
 

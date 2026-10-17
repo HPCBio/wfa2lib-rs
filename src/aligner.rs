@@ -81,6 +81,22 @@ pub enum MemoryMode {
 ///   are unchanged. This applies to any heuristic that trims a wavefront
 ///   to empty.
 ///
+/// - **Z-drop ends** (HPCBio/wfa2lib-rs#22): C backtraces the partial
+///   alignment from the best cell's diagonal and offset but at the current
+///   score, where that cell needn't exist. High memory then finds no
+///   source and returns an empty CIGAR or one with unchecked matches
+///   (invalid with `match < 0`); med/low read a dead cell whose backtrace
+///   C never initialized, so C's result depends on earlier alignments.
+///   Corrected mode backtraces the best cell at the score it was found at,
+///   keeping its backtrace for med/low, so all memory modes give a valid
+///   partial alignment with the same score.
+///
+/// - **X-drop and Z-drop with `match == 0`** (HPCBio/wfa2lib-rs#55): their
+///   Smith-Waterman score needs a stand-in match score, and C's is -1, so
+///   progress lowers the score: X-drop prunes the diagonals that progress
+///   most (abandoning most divergent pairs), and Z-drop's best cell is the
+///   start. Corrected mode uses +1, as C did before its commit 51fb1aa.
+///
 /// Otherwise, gap-linear/affine/affine2p with `match == 0` give identical
 /// results in both modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -172,6 +188,9 @@ pub struct WavefrontAligner<const N: usize> {
     pub compat: Compat,
     /// Corrected-mode ends-free end candidate (see [`Compat::Corrected`]).
     endsfree_best: Option<EndsfreeCandidate>,
+    /// Corrected-mode Z-drop best cell's piggyback backtrace `(pcigar, prev)`
+    /// (med/low), kept from the score it was found at (HPCBio/wfa2lib-rs#22).
+    zdrop_best_bt: (Pcigar, BtBlockIdx),
 
     // Heuristic
     pub heuristic: HeuristicStrategy,
@@ -423,6 +442,7 @@ impl<const N: usize> WavefrontAligner<N> {
             extension: false,
             compat: Compat::C,
             endsfree_best: None,
+            zdrop_best_bt: (0, BT_BLOCK_IDX_NULL),
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
             memory_mode: MemoryMode::High,
@@ -467,12 +487,16 @@ impl<const N: usize> WavefrontAligner<N> {
         if buf.get_size_used() <= self.max_memory_compact {
             return;
         }
-        let mut pinned = self.endsfree_best.map_or(BT_BLOCK_IDX_NULL, |b| b.bt.1);
+        let mut pinned = [
+            self.endsfree_best.map_or(BT_BLOCK_IDX_NULL, |b| b.bt.1),
+            self.zdrop_best_bt.1,
+        ];
         self.wf_components
             .compact_bt_buffer(score as usize, &mut pinned);
         if let Some(b) = self.endsfree_best.as_mut() {
-            b.bt.1 = pinned;
+            b.bt.1 = pinned[0];
         }
+        self.zdrop_best_bt.1 = pinned[1];
         let max_partial_compacts = if self.memory_mode == MemoryMode::Low {
             1
         } else {
@@ -629,14 +653,9 @@ impl<const N: usize> WavefrontAligner<N> {
             && self.alignment_end_pos.offset != OFFSET_NULL
         {
             // Z-dropped: partial alignment up to the best cell, max-trimmed
-            // (C's `wavefront_unialign_terminate`, which backtraces with the
-            // current score).
+            // (C's `wavefront_unialign_terminate`).
             if self.alignment_scope == AlignmentScope::ComputeAlignment {
-                self.backtrace_from(
-                    score,
-                    self.alignment_end_pos.k,
-                    self.alignment_end_pos.offset,
-                );
+                self.backtrace_zdrop_end(score);
                 self.maxtrim_cigar();
             }
             self.status = AlignStatus::Partial;
@@ -737,6 +756,8 @@ impl<const N: usize> WavefrontAligner<N> {
                         self.backtrace_from(score, k, offset);
                     }
                     self.cigar.score = best.total;
+                } else if unreachable {
+                    self.backtrace_zdrop_end(score);
                 } else {
                     self.backtrace_from(
                         score,
@@ -848,6 +869,7 @@ impl<const N: usize> WavefrontAligner<N> {
         };
         self.heuristic_state.reset(&self.heuristic);
         self.endsfree_best = None;
+        self.zdrop_best_bt = (0, BT_BLOCK_IDX_NULL);
 
         // Compute allocation limits based on sequence lengths.
         // k ranges from -plen to +tlen, so we need wavefronts that cover this
@@ -1164,6 +1186,24 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
+    /// Backtrace a Z-drop end, the best cell in `alignment_end_pos`, at the
+    /// current `score`, as C does. The cell was found at an earlier score
+    /// and needn't exist at `score`: high mode then finds no source (an empty
+    /// CIGAR, or unchecked matches), and med/low read a dead cell
+    /// (HPCBio/wfa2lib-rs#22). Corrected mode backtraces it at the score it
+    /// was found at, from the wavefronts (high) or from its backtrace kept
+    /// then (med/low).
+    fn backtrace_zdrop_end(&mut self, score: i32) {
+        let WavefrontPos { score: best_score, k, offset } = self.alignment_end_pos;
+        if self.compat == Compat::C {
+            self.backtrace_from(score, k, offset);
+        } else if self.wf_components.bt_piggyback {
+            self.backtrace_piggyback_bt(self.zdrop_best_bt, best_score, k, offset);
+        } else {
+            self.backtrace_from(best_score, k, offset);
+        }
+    }
+
     /// Backtrace the CIGAR from M-wavefront cell (`k`, `offset`), starting at
     /// `score` (C's `wavefront_unialign_terminate`).
     fn backtrace_from(&mut self, score: i32, k: i32, offset: WfOffset) {
@@ -1306,6 +1346,7 @@ impl<const N: usize> WavefrontAligner<N> {
 
         let wf = unsafe { &mut *m_ptr };
         let (lo_base, hi_base) = (wf.lo, wf.hi);
+        let max_wf_score_base = self.heuristic_state.max_wf_score;
         let zdropped = heuristic::heuristic_cutoff(
             &self.heuristic,
             &mut self.heuristic_state,
@@ -1314,9 +1355,21 @@ impl<const N: usize> WavefrontAligner<N> {
             distances_base_k,
             plen,
             tlen,
-            self.penalties.match_,
+            heuristic::swg_match(self.penalties.match_, self.compat),
             score,
         );
+
+        // Corrected mode: keep the backtrace of a new Z-drop best cell, which
+        // the end backtrace needs after its wavefront is gone (med/low,
+        // HPCBio/wfa2lib-rs#22).
+        let st = &self.heuristic_state;
+        if self.compat == Compat::Corrected
+            && self.wf_components.bt_piggyback
+            && st.max_wf_score == score
+            && max_wf_score_base != score
+        {
+            self.zdrop_best_bt = wf.bt_or_zero(st.max_sw_score_k);
+        }
 
         if zdropped {
             // C's `wavefront_heuristic_zdrop`: the alignment ends at the best
@@ -2301,11 +2354,17 @@ impl<const N: usize> WavefrontAligner<N> {
             b.alignment_scope = AlignmentScope::ComputeAlignment;
             self.biwfa_base = Some(Box::new(b));
         }
-        (
+        let (mut fwd, mut rev, mut base) = (
             self.biwfa_fwd.take().unwrap(),
             self.biwfa_rev.take().unwrap(),
             self.biwfa_base.take().unwrap(),
-        )
+        );
+        // The sub-aligners run the heuristics and the base backtrace, so
+        // they follow this aligner's mode (set_compat can change it later).
+        fwd.compat = self.compat;
+        rev.compat = self.compat;
+        base.compat = self.compat;
+        (fwd, rev, base)
     }
 
     /// End-to-end alignment using a custom match function (Lambda mode).
@@ -2354,6 +2413,7 @@ impl<const N: usize> WavefrontAligner<N> {
             extension: false,
             compat: Compat::C,
             endsfree_best: None,
+            zdrop_best_bt: (0, BT_BLOCK_IDX_NULL),
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
             memory_mode: MemoryMode::High,
@@ -2744,7 +2804,14 @@ impl<const N: usize> WavefrontAligner<N> {
                 Ok(score)
             }
             AlignStatus::EndUnreachable if pos.offset != OFFSET_NULL => {
-                base.backtrace_components(score, pos.k, pos.offset, component_begin, component_end);
+                // C starts at the current score, in `component_end`;
+                // corrected mode at the best cell's score, in M (the cell is
+                // an M cell; HPCBio/wfa2lib-rs#22, as `backtrace_zdrop_end`).
+                if base.compat == Compat::C {
+                    base.backtrace_components(score, pos.k, pos.offset, component_begin, component_end);
+                } else {
+                    base.backtrace_components(pos.score, pos.k, pos.offset, component_begin, ComponentType::M);
+                }
                 base.maxtrim_cigar();
                 Err(BiStatus::Unattainable)
             }

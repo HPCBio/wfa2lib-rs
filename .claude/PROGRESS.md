@@ -70,7 +70,13 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   modes. Root cause: in `med`/`low`, C backtraces from the end diagonal at
   the current score, often a dead cell whose chain comes from uninitialized
   memory, so C's output depends on earlier alignments. Rust reads such
-  cells as zeroes (deterministic; matches C on fresh memory).
+  cells as zeroes (deterministic; matches C on fresh memory). C's high mode
+  backtraces at the same wrong score (empty or invalid CIGARs). **Fixed in
+  corrected mode** (FIXED_BUGS 14e).
+- HPCBio/wfa2lib-rs#55: X-drop/Z-drop with `match == 0` use a sign-flipped
+  Smith-Waterman score (C regression from 51fb1aa): X-drop abandons most
+  divergent pairs, Z-drop's best cell is the start. **Fixed in corrected
+  mode** (FIXED_BUGS 14f).
 - HPCBio/wfa2lib-rs#23: score-only score for unreachable alignments (match < 0)
   is evaluated at C's unset end position (signed overflow); reproduced.
 - HPCBio/wfa2lib-rs#24: edit/indel + banded-static never terminates in C;
@@ -190,3 +196,13 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - **2026-10-17:** HPCBio/wfa2lib-rs#21 fixed in corrected mode: a wavefront
   trimmed empty by a heuristic cutoff is null for the backtrace too, as for
   compute. X-drop with steps > 1 now gives valid CIGARs; scores unchanged.
+- **2026-10-17:** HPCBio/wfa2lib-rs#22 fixed in corrected mode: a Z-drop end
+  is backtraced from the best cell at the score it was found at (its
+  backtrace kept and pinned for med/low). All memory modes agree and every
+  partial CIGAR is valid; C's high mode had invalid ones with match < 0.
+- **2026-10-17:** HPCBio/wfa2lib-rs#55 (found while fixing #22): with
+  `match == 0`, C's X-drop/Z-drop score has its sign flipped since 51fb1aa.
+  Corrected mode uses +1: X-drop with default penalties goes from ~0/300 to
+  300/300 optimal on `long.seq`.
+- **2026-10-17:** corrected mode now reaches BiWFA's sub-aligners (a Rust bug
+  from #54, FIXED_BUGS 14g): the #21 and #55 fixes apply under BiWFA too.
