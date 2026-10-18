@@ -188,6 +188,14 @@ pub struct WavefrontAligner<const N: usize> {
     pub compat: Compat,
     /// Corrected-mode ends-free end candidate (see [`Compat::Corrected`]).
     endsfree_best: Option<EndsfreeCandidate>,
+    /// Corrected-mode begin-free dominance pruning
+    /// ([`Self::endsfree_dominance_prune`]): the furthest offset per
+    /// component and diagonal at earlier scores (M extended), component `c`
+    /// at `c * dominance_len + k - dominance_base`. Empty when the pruning is
+    /// off.
+    dominance_best: Vec<WfOffset>,
+    dominance_base: i32,
+    dominance_len: usize,
     /// Corrected-mode Z-drop best cell's piggyback backtrace `(pcigar, prev)`
     /// (med/low), kept from the score it was found at (HPCBio/wfa2lib-rs#22).
     zdrop_best_bt: (Pcigar, BtBlockIdx),
@@ -365,6 +373,14 @@ const MAX_MEMORY_COMPACT: u64 = 256 << 20;
 /// C's `probe_interval_compact` (6000; checked within the 3000 global
 /// interval, so every 6000 scores).
 const PROBE_INTERVAL_COMPACT: i32 = 6000;
+
+/// Largest begin-free limit for which gap-affine/affine2p alignments use
+/// begin-free dominance pruning (`endsfree_dominance_prune`; gap-linear
+/// always does). With more seeds fewer of their cells are dominated, and
+/// pruning three or five components every score then costs more than it
+/// saves on short pairs: 1.1-1.3x slower at a 16-base limit on 240 bp pairs,
+/// against 0.5-0.97x up to 4 (HPCBio/wfa2lib-rs#31).
+const DOMINANCE_MAX_BEGIN_FREE_GAP: i32 = 4;
 const PATTERN_LENGTH_INIT: i32 = 1000;
 const TEXT_LENGTH_INIT: i32 = 1000;
 
@@ -442,6 +458,9 @@ impl<const N: usize> WavefrontAligner<N> {
             extension: false,
             compat: Compat::C,
             endsfree_best: None,
+            dominance_best: Vec::new(),
+            dominance_base: 0,
+            dominance_len: 0,
             zdrop_best_bt: (0, BT_BLOCK_IDX_NULL),
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),
@@ -882,6 +901,28 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.historic_min_lo = eff_lo;
         self.wf_components.historic_max_hi = eff_hi;
 
+        // Begin-free dominance pruning: only where it pays (begin-free seeds;
+        // see `DOMINANCE_MAX_BEGIN_FREE_GAP`) and, like `endsfree_prune`,
+        // where no heuristic reads the wavefronts.
+        self.dominance_best.clear();
+        let begin_free = self.pattern_begin_free.max(self.text_begin_free);
+        if self.endsfree_corrected()
+            && self.alignment_span == AlignmentSpan::EndsFree
+            && begin_free > 0
+            && (self.penalties.distance_metric == DistanceMetric::GapLinear
+                || begin_free <= DOMINANCE_MAX_BEGIN_FREE_GAP)
+            && matches!(
+                self.heuristic,
+                HeuristicStrategy::None | HeuristicStrategy::BandedStatic { .. }
+            )
+        {
+            self.dominance_base = eff_lo;
+            self.dominance_len = (eff_hi - eff_lo + 1) as usize;
+            let components = self.dominance_getters().len();
+            self.dominance_best
+                .resize(components * self.dominance_len, -1);
+        }
+
         // Allocate initial M-wavefront at score 0, over C's initial range
         // (the begin-free diagonals with match == 0).
         let (lo0, hi0) =
@@ -1070,6 +1111,7 @@ impl<const N: usize> WavefrontAligner<N> {
             self.endsfree_prune(score, best.total);
         }
 
+        let dominance = !self.dominance_best.is_empty();
         if !m_ptr.is_null() {
             let wf = unsafe { &mut *m_ptr };
             let found = if self.sequences.mode == SequenceMode::Lambda {
@@ -1105,6 +1147,10 @@ impl<const N: usize> WavefrontAligner<N> {
                     }
                 }
             }
+        }
+
+        if dominance && !is_null_wf(m_ptr) {
+            self.endsfree_dominance_update(unsafe { &*m_ptr }, 0);
         }
 
         // No later cell can beat the candidate
@@ -1183,6 +1229,111 @@ impl<const N: usize> WavefrontAligner<N> {
             if !ptr.is_null() {
                 unsafe { (*ptr).trim_nulled(lo, hi) };
             }
+        }
+    }
+
+    /// Corrected-mode begin-free dominance pruning: trim from the ends of a
+    /// component `c` wavefront just computed the cells that reach no further
+    /// on their diagonal than a cell of that component did at an earlier
+    /// score (M extended). Interior cells are kept: dropping them too saves
+    /// little and leaves extend skipping null cells unpredictably.
+    ///
+    /// Each begin-free seed (`endsfree_begin_k`) starts a lineage of cells at
+    /// scores the others don't reach, so with even one or two seeds most
+    /// scores get a wavefront, and with no matches on the shifted diagonals
+    /// these lineages trail the main one (HPCBio/wfa2lib-rs#31). Cell
+    /// (k, o) at score s is dominated by a cell (k, o') of the same
+    /// component at an earlier score with o' >= o: costs are non-negative
+    /// and matches free, so any path on from (k, o) can be redirected from
+    /// (k, o') at no extra cost (its first gap run one base shorter, or its
+    /// first diagonal step absorbed into it), to the same end and so the
+    /// same skipped-base charge. An extended M cell's matches can't pass o'
+    /// either, where the extension stopped. So the best total doesn't
+    /// change. M offsets are at least the I/D ones at each score, so an M
+    /// cell taken from a dropped I/D cell is dropped too.
+    ///
+    /// With `record`, also records the kept offsets (I/D, which aren't
+    /// extended; M is recorded after extend, by
+    /// [`Self::endsfree_dominance_update`]).
+    #[inline(always)]
+    fn endsfree_dominance_prune(
+        &mut self,
+        wf: &mut crate::wavefront::Wavefront,
+        c: usize,
+        record: bool,
+    ) {
+        if wf.lo > wf.hi {
+            return;
+        }
+        let (lo, hi, base_k) = (wf.lo, wf.hi, wf.base_k());
+        let offsets = &mut wf.offsets_slice_mut()[(lo - base_k) as usize..=(hi - base_k) as usize];
+        let base = c * self.dominance_len + (lo - self.dominance_base) as usize;
+        let best = &mut self.dominance_best[base..base + offsets.len()];
+        // Trim dominated cells from the ends only
+        let n = offsets.len();
+        let mut first = 0;
+        while first < n && offsets[first] <= best[first] {
+            first += 1;
+        }
+        let mut last = n;
+        while last > first && offsets[last - 1] <= best[last - 1] {
+            last -= 1;
+        }
+        if record {
+            for (b, &o) in best[first..last].iter_mut().zip(&offsets[first..last]) {
+                *b = (*b).max(o);
+            }
+        }
+        // Null the dropped cells, so the high-memory backtrace (which reads
+        // the initialized range) sees the cells compute did
+        offsets[..first].fill(OFFSET_NULL);
+        offsets[last..].fill(OFFSET_NULL);
+        if first == last {
+            wf.lo = 1;
+            wf.hi = 0;
+            wf.null = true;
+        } else {
+            wf.lo = lo + first as i32;
+            wf.hi = lo + last as i32 - 1;
+        }
+    }
+
+    /// Record component `c`'s offsets at the current score for
+    /// [`Self::endsfree_dominance_prune`].
+    #[inline(always)]
+    fn endsfree_dominance_update(&mut self, wf: &crate::wavefront::Wavefront, c: usize) {
+        if wf.null || wf.lo > wf.hi {
+            return;
+        }
+        let (lo, hi, base_k) = (wf.lo, wf.hi, wf.base_k());
+        let offsets = &wf.offsets_slice()[(lo - base_k) as usize..=(hi - base_k) as usize];
+        let base = c * self.dominance_len + (lo - self.dominance_base) as usize;
+        for (b, &offset) in self.dominance_best[base..base + offsets.len()]
+            .iter_mut()
+            .zip(offsets)
+        {
+            *b = (*b).max(offset);
+        }
+    }
+
+    /// The components of the distance metric, M first.
+    fn dominance_getters(
+        &self,
+    ) -> &'static [fn(&WavefrontComponents<N>, usize) -> *mut crate::wavefront::Wavefront] {
+        match self.penalties.distance_metric {
+            DistanceMetric::GapAffine => &[
+                WavefrontComponents::get_m_ptr,
+                WavefrontComponents::get_i1_ptr,
+                WavefrontComponents::get_d1_ptr,
+            ],
+            DistanceMetric::GapAffine2p => &[
+                WavefrontComponents::get_m_ptr,
+                WavefrontComponents::get_i1_ptr,
+                WavefrontComponents::get_d1_ptr,
+                WavefrontComponents::get_i2_ptr,
+                WavefrontComponents::get_d2_ptr,
+            ],
+            _ => &[WavefrontComponents::get_m_ptr],
         }
     }
 
@@ -1692,6 +1843,9 @@ impl<const N: usize> WavefrontAligner<N> {
                 self.endsfree_init(wf_curr, k);
             }
             compute::trim_ends(plen, tlen, wf_curr);
+            if !self.dominance_best.is_empty() {
+                self.endsfree_dominance_prune(wf_curr, 0, false);
+            }
         }
     }
 
@@ -1877,6 +2031,11 @@ impl<const N: usize> WavefrontAligner<N> {
             compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
             compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
             compute::trim_ends(plen, tlen, &mut *d1_curr_ptr);
+            if !self.dominance_best.is_empty() {
+                self.endsfree_dominance_prune(&mut *m_curr_ptr, 0, false);
+                self.endsfree_dominance_prune(&mut *i1_curr_ptr, 1, true);
+                self.endsfree_dominance_prune(&mut *d1_curr_ptr, 2, true);
+            }
         }
     }
 
@@ -2226,6 +2385,17 @@ impl<const N: usize> WavefrontAligner<N> {
             if d2_stored {
                 compute::trim_ends(plen, tlen, &mut *d2_curr_ptr);
             }
+            if !self.dominance_best.is_empty() {
+                self.endsfree_dominance_prune(&mut *m_curr_ptr, 0, false);
+                self.endsfree_dominance_prune(&mut *i1_curr_ptr, 1, true);
+                self.endsfree_dominance_prune(&mut *d1_curr_ptr, 2, true);
+                if i2_stored {
+                    self.endsfree_dominance_prune(&mut *i2_curr_ptr, 3, true);
+                }
+                if d2_stored {
+                    self.endsfree_dominance_prune(&mut *d2_curr_ptr, 4, true);
+                }
+            }
         }
     }
 
@@ -2423,6 +2593,9 @@ impl<const N: usize> WavefrontAligner<N> {
             extension: false,
             compat: Compat::C,
             endsfree_best: None,
+            dominance_best: Vec::new(),
+            dominance_base: 0,
+            dominance_len: 0,
             zdrop_best_bt: (0, BT_BLOCK_IDX_NULL),
             heuristic: HeuristicStrategy::None,
             heuristic_state: HeuristicState::default(),

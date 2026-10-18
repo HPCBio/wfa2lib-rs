@@ -463,6 +463,61 @@ fn random_long_against_oracle() {
     }
 }
 
+/// Amplicon-like pairs (two mutants of a 240 bp core, sometimes with a
+/// ragged 5' end) with a small begin-free tolerance, as dada2-rs uses: the
+/// begin-free seeds' lineages are mostly dominated and pruned
+/// (HPCBio/wfa2lib-rs#31).
+#[test]
+fn small_begin_free_against_oracle() {
+    let mut rng = Lcg(11);
+    for iter in 0..120 {
+        let kind = rng.below(3) as usize;
+        let p = match kind {
+            0 => Pen::linear(-5, 4, 8),
+            1 => Pen::affine(-5, 4, rng.below(6), 8),
+            _ => Pen {
+                match_: -5,
+                mismatch: 4,
+                o1: 0,
+                e1: 8,
+                o2: 10,
+                e2: 4,
+            },
+        };
+        let core: Vec<u8> = (0..240).map(|_| b"ACGT"[rng.below(4) as usize]).collect();
+        let rate = 10 + rng.below(90) as u64; // 1 in 10..100
+        let mut mutant = || {
+            let mut s = Vec::new();
+            for &c in &core {
+                match rng.below(rate) {
+                    0 => s.push(b"ACGT"[rng.below(4) as usize]),
+                    1 => {}
+                    2 => s.extend([c, b"ACGT"[rng.below(4) as usize]]),
+                    _ => s.push(c),
+                }
+            }
+            match rng.below(4) {
+                0 => {
+                    let d = 1 + rng.below(3) as usize;
+                    s.drain(..d);
+                }
+                1 => {
+                    let f: Vec<u8> = (0..1 + rng.below(3))
+                        .map(|_| b"ACGT"[rng.below(4) as usize])
+                        .collect();
+                    s.splice(0..0, f);
+                }
+                _ => {}
+            }
+            s
+        };
+        let (pat, txt) = (mutant(), mutant());
+        let t = 1 + iter % 5;
+        let e = if iter % 2 == 0 { 0 } else { 16 };
+        check(kind, &p, &pat, &txt, (t, e, t, e));
+    }
+}
+
 /// Corrected mode with `BandedStatic` where the end diagonal lies outside
 /// the band: the band and the pruning empty every wavefront long before the
 /// optimum, a begin-free seed outside the band at score 754, is reached.
