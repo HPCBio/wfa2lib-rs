@@ -218,3 +218,6 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   mixed long/short workloads in high memory 0.30× the time (C's benchmark:
   1231 → 365 ms, C 421 ms); a dada2-like interleaved workload 735 → 209 ms.
   Output identical.
+- **2026-10-18:** begin-free ends-free cost (HPCBio/dada2-rs#51) investigated:
+  inherent step count, not prunable exactly; two per-step overhead cuts
+  (short NULL fills, banded cutoff fast path) give 9–16% on dada2-like pairs.

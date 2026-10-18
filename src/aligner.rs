@@ -1337,6 +1337,16 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Apply heuristic cutoff to the M-wavefront (and I/D wavefronts if affine).
     /// Returns true if alignment should be terminated (z-drop).
     fn apply_heuristic_cutoff(&mut self, score: i32, m_ptr: *mut crate::wavefront::Wavefront) -> bool {
+        // Banded-static inside its band (compute already clamps to it; only
+        // begin-free seeding can reach past it): the cutoff would change
+        // nothing, and it doesn't use `steps_wait`. Skip the general path,
+        // which runs every step (HPCBio/wfa2lib-rs#31).
+        if let HeuristicStrategy::BandedStatic { min_k, max_k } = self.heuristic {
+            let wf = unsafe { &*m_ptr };
+            if wf.lo >= min_k && wf.hi <= max_k {
+                return false;
+            }
+        }
         let plen = self.sequences.pattern_length;
         let tlen = self.sequences.text_length;
 
