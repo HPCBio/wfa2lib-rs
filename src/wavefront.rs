@@ -114,6 +114,24 @@ impl Drop for Wavefront {
     }
 }
 
+/// Fill `count` offsets at `ptr` with `OFFSET_NULL`. The per-step fills
+/// widen an input's initialized range by a diagonal or two, and `fill`
+/// lowers to a `memset_pattern16` call whose setup costs far more than the
+/// stores (HPCBio/wfa2lib-rs#31). Short ones use plain stores, kept as
+/// stores (volatile) so LLVM doesn't turn the loop back into that call.
+#[inline(always)]
+unsafe fn fill_null(ptr: *mut WfOffset, count: usize) {
+    unsafe {
+        if count <= 8 {
+            for i in 0..count {
+                std::ptr::write_volatile(ptr.add(i), OFFSET_NULL);
+            }
+        } else {
+            std::slice::from_raw_parts_mut(ptr, count).fill(OFFSET_NULL);
+        }
+    }
+}
+
 impl Wavefront {
     /// Allocate a new wavefront with the given number of elements.
     ///
@@ -412,13 +430,7 @@ impl Wavefront {
         // C's `for (k=min_lo;k<min_init;++k)` is a no-op in that case.
         if start < min_init {
             let count = (min_init - start) as usize;
-            unsafe {
-                let slice = std::slice::from_raw_parts_mut(
-                    self.centered_offsets.offset(start as isize),
-                    count,
-                );
-                slice.fill(OFFSET_NULL);
-            }
+            unsafe { fill_null(self.centered_offsets.offset(start as isize), count) };
             self.zero_bt(start, count);
         }
         self.wf_elements_init_min = start;
@@ -438,13 +450,7 @@ impl Wavefront {
         let start = max_init + 1;
         if end > max_init {
             let count = (end - max_init) as usize;
-            unsafe {
-                let slice = std::slice::from_raw_parts_mut(
-                    self.centered_offsets.offset(start as isize),
-                    count,
-                );
-                slice.fill(OFFSET_NULL);
-            }
+            unsafe { fill_null(self.centered_offsets.offset(start as isize), count) };
             self.zero_bt(start, count);
         }
         self.wf_elements_init_max = end;
