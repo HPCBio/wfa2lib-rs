@@ -552,3 +552,45 @@ plain gap-affine: 56 → 45 ms.
 Output identical to `main` on the interleaved set for every metric,
 high/med/ultralow, score-only, corrected ends-free (affine and linear,
 banded) and X-drop. Unit test `test_reap_cigar_busy_after_large_slab`.
+
+## 2026-10-18: per-step overhead on narrow banded ends-free alignments (HPCBio/wfa2lib-rs#31, HPCBio/dada2-rs#51)
+
+dada2-rs found begin-free gaps make each ends-free alignment ~3× slower
+(#31 comment, 2026-10-18). Investigation on synthetic dada2-like pairs
+(20 bases × 100 mutants, ~20% of differences indels; linear `-5,4,8` /
+affine `-5,4,0,8`, corrected, banded-static ±band, free ends = band):
+
+- Seeded begin-free diagonals do stay in the wavefront: 240 bp at 2%,
+  35 → 604 cells and 10 → 43 non-null steps per alignment; 1450 bp,
+  2,039 → 18,518 cells, mean width 50 of 65.
+- Pruning them early does not help: an initial upper bound for corrected
+  mode's exact pruning (the better of two gapless alignments, O(n)) left
+  output identical but was 2–18% slower. With a match reward a cell's lower
+  bound grows only `|match|` per diagonal of distance from the end
+  diagonal, against 18 per difference, so the seeded diagonals can't be
+  excluded until the search is nearly done. Not merged.
+- The time follows the step count, ~170 ns per extra non-null step (about
+  13 ns per extra cell, against < 1 ns of kernel work). Profile: corrected
+  extend ~40%, `compute_linear_step` ~33%, NULL fills (`memset_pattern16`)
+  ~8%, slab allocation ~5%, banded cutoff ~6%. Corrected mode itself is only
+  7–10% over C mode here.
+
+Two changes:
+- `init_ends` fills of up to 8 offsets use (volatile) stores instead of
+  `fill`, which lowered to a `memset_pattern16` call per input per step.
+- `apply_heuristic_cutoff` returns at once for banded-static inside the
+  band (compute already clamps to it).
+
+M2, median of 5, ms, `main` (`bef359a`) → this change, output identical:
+
+| data | linear, begin off | linear, begin on | affine, begin off | affine, begin on |
+|---|---|---|---|---|
+| 240 bp, 2% | 5.6 → 4.8 | 16.4 → 14.5 | 8.0 → 7.0 | 25.1 → 22.6 |
+| 240 bp, 10% | 16.6 → 14.1 | 47.6 → 41.1 | 23.6 → 20.2 | 72.2 → 60.7 |
+| 1450 bp, 2% | 58.8 → 52.9 | 190.3 → 172.8 | 79.6 → 70.3 | 257.5 → 226.8 |
+| 1450 bp, 10% | 164.4 → 149.5 | 479.1 → 437.5 | 220.0 → 193.9 | 659.5 → 586.0 |
+
+9–16% faster; utest/long gap-affine controls 0.99 / 0.96. The begin-free
+3× remains: it is the step count of an exact WFA with seeded diagonals.
+The rest of the per-step cost is spread thin (a call, a division, ~2–3%
+each).
