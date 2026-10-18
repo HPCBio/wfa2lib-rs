@@ -594,3 +594,50 @@ M2, median of 5, ms, `main` (`bef359a`) → this change, output identical:
 3× remains: it is the step count of an exact WFA with seeded diagonals.
 The rest of the per-step cost is spread thin (a call, a division, ~2–3%
 each).
+
+## 2026-10-18: begin-free dominance pruning (HPCBio/wfa2lib-rs#31, HPCBio/dada2-rs#289)
+
+Corrects the entry above: the begin-free cost *is* mostly prunable exactly.
+dada2-rs found it is a step, not a slope (a begin-free limit of 1 doubles
+the cost, 2 is close to the full bound), in both compat modes. Per-score
+dumps show why: each seed k starts a lineage of wavefronts at scores
+k·|m| + (sums of the mismatch/gap costs) that the main lineage never
+reaches, so a couple of seeds make most scores non-null (240 bp at 2%:
+33 → 94 non-null steps per pair of ~142 scores at limit 2; 120 at the full
+bound). Their cells are mostly dominated: a cell of the same component reached at least
+as far on that diagonal at an earlier score. With non-negative transformed
+costs, any path on from a dominated cell can be redirected from the
+dominating one at no extra cost, so dropping it is exact.
+
+Corrected mode, no heuristic or `BandedStatic`: after compute, dominated
+cells are trimmed from the ends of each M/I/D wavefront (M against offsets
+recorded after extend). Findings on the way:
+- Trim from the ends only: also nulling interior cells saved nothing, and
+  extend then branches unpredictably on null cells.
+- Branch-free selects (a conditional store didn't vectorize); prune in the
+  compute step, where the output pointers are at hand.
+- Affine/affine2p pay three or five passes per score. With many seeds
+  fewer cells are dominated, and on short pairs at a 16-base limit the
+  passes cost more than they save (1.1–1.3×). Gated: always for gap-linear,
+  for affine/affine2p up to a limit of 4. Fusing the check into the compute
+  kernels would lift the gate.
+
+M2, median of 5, ms per 2,000 synthetic dada2-like pairs (corrected,
+banded ±16/±32, end-free = band), `b83c0ea` → `05bc1a3`, output identical:
+
+| data | pen | t=0 | t=2 | t=3 | t=5 | t=band |
+|---|---|---|---|---|---|---|
+| 240 bp 2% | linear | 0.98 | 0.79 | 0.71 | 0.84 | 0.95 |
+| 240 bp 10% | linear | 1.01 | 0.71 | 0.61 | 0.79 | 0.95 |
+| 1450 bp 2% | linear | 0.98 | 0.59 | 0.50 | 0.67 | 0.79 |
+| 1450 bp 10% | linear | 1.00 | 0.51 | 0.47 | 0.54 | 0.62 |
+| 240 bp 10% | affine `o=0` | 1.01 | 0.76 | 0.66 | 1.00 | 1.00 |
+| 1450 bp 10% | affine `o=0` | 1.01 | 0.57 | 0.54 | 1.01 | 1.01 |
+| 1450 bp 10% | affine `-5,4,6,2` | 1.03 | 0.60 | 0.57 | 0.95 | 1.08 |
+
+utest/long global affine controls 1.00 / 0.99. Byte-identical to `main` over
+1,008 CLI configurations (linear/affine/affine2p, seven spans, high/med/low,
+±band). dada2-rs (rev `05bc1a3`): NW parity sweeps, the PacBio concordance
+fixture and 7,980 real pairs per dataset at six limits give identical scores,
+tables and error models; linear ends-free at the full bound goes from 3.0× to
+1.5–1.6× its t = 0 cost (PacBio 5.43 → 2.74 s, MiSeq 0.454 → 0.262 s).
