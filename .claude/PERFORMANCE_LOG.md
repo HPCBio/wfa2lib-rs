@@ -516,3 +516,39 @@ output identical in all cases:
   banded 1.28× → 0.83×, 10 kb 0.97× → 0.87×.
 - On the EPYC it is about the same as just removing the prefetches (2–6%
   faster on most affine2p cases, the rest within noise). ARM is unchanged.
+
+## 2026-10-17: slab reap after long alignments (Marco-Sola-Lab/WFA2-lib#140, HPCBio/wfa2lib-rs#31)
+
+C #140 (`cda19a0`, already in the pinned C commit) makes the slab clear walk
+only the wavefronts handed out since the last clear. It was listed as "speed
+only, n/a"; checking it for dada2-rs, Rust had the same problem, and worse.
+
+- Cause: in high memory (CIGAR), `init_alignment` calls
+  `WavefrontSlab::reap_cigar`, which walked every wavefront the slab ever
+  created, deallocated ones included. A long alignment leaves thousands of
+  them, and every later short alignment paid for the walk: `sample` put
+  ~70% of the mixed run in `reap_cigar`.
+- Fix: record the indices handed out (`busy`) and, with no mixed lengths
+  (C's `dirty`), return only those. Recording costs ~2% on uniform short
+  workloads, so it is done only while the slab has ≥ 4096 wavefronts (only
+  after long or divergent alignments), and a busy set ≥ ¼ of the slab still
+  takes the ordered full walk.
+
+C's benchmark (`tests/wfa.bench.slab.sh` data: 10 × 10 kb then 200k ×
+100 bp, 5% error, gap-affine), M2 Pro under load ~2.5–3.8, median of 7,
+alignment time in ms:
+
+| Data | Mode | C before #140 | C after #140 | Rust `main` | Rust busy reap |
+|---|---|---|---|---|---|
+| mixed | high | 700 | 421 | 1231 | **365** (−70%) |
+| mixed | med | 774 | 782 | 651 | 653 |
+| short only | high | 362 | 376 | 322 | 318 |
+| short only | med | 609 | 619 | 565 | 556 |
+
+Interleaved (each 10 kb pair followed by 300 × 100 bp), median of 5:
+dada2-like `-5,4,0,8` ends-free 0.1, banded ±16, corrected: 735 → 209 ms;
+plain gap-affine: 56 → 45 ms.
+
+Output identical to `main` on the interleaved set for every metric,
+high/med/ultralow, score-only, corrected ends-free (affine and linear,
+banded) and X-drop. Unit test `test_reap_cigar_busy_after_large_slab`.

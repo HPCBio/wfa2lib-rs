@@ -55,8 +55,11 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
 - [x] 11b225e / 6176f94 (Marco-Sola-Lab/WFA2-lib#144): M0's initialized range
   covers the ends-free begin seeds, so edit/indel begin-gap CIGARs are valid
   (HPCBio/wfa2lib-rs#18). Was corrected-mode only; now unconditional.
-- n/a cda19a0 (Marco-Sola-Lab/WFA2-lib#140): slab clears only the wavefronts
-  used since the last clear. Speed only, no output change.
+- [x] cda19a0 (Marco-Sola-Lab/WFA2-lib#140): the slab reaps only the wavefronts
+  handed out since the last reap. No output change. Ported in
+  `WavefrontSlab::reap_cigar` (busy list, recorded only while the slab is
+  large): after long alignments, short ones in high memory were up to 3.5×
+  slower than needed (PERFORMANCE_LOG 2026-10-17).
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and
   C++-binding commits.
 
@@ -211,3 +214,7 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - **2026-10-17:** HPCBio/wfa2lib-rs#23 fixed in corrected mode (CLI): score-only
   output without an alignment is -1, as in CIGAR mode, instead of C's
   overflowed, give-up or INT32_MIN scores.
+- **2026-10-17:** ported C's busy-list slab reap (Marco-Sola-Lab/WFA2-lib#140):
+  mixed long/short workloads in high memory 0.30× the time (C's benchmark:
+  1231 → 365 ms, C 421 ms); a dada2-like interleaved workload 735 → 209 ms.
+  Output identical.

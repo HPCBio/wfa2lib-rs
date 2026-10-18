@@ -21,6 +21,10 @@ use crate::offset::wavefront_length;
 use crate::wavefront::{Wavefront, WavefrontStatus};
 
 const WF_SLAB_EXPAND_FACTOR: f32 = 1.5;
+/// Slab size from which `reap_cigar` records the wavefronts it hands out
+/// (`busy`). Short alignments use a few hundred; a slab this large comes
+/// from a long or divergent alignment.
+const BUSY_TRACKING_MIN: usize = 4096;
 
 /// Slab allocation strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +63,16 @@ pub struct WavefrontSlab {
     /// than `init_wf_length`; Reuse: allocated before `current_wf_length`
     /// last grew), so `reap_cigar` must start over.
     mixed_lengths: bool,
+    /// Indices handed out since the last reap (may repeat). With no mixed
+    /// lengths, every other live wavefront is already on the free list, so
+    /// `reap_cigar` only returns these (C's `wavefronts_busy`, from
+    /// Marco-Sola-Lab/WFA2-lib#140): after a long alignment the slab is large,
+    /// and walking all of it before each short one dominated their time.
+    busy: Vec<WavefrontIdx>,
+    /// Whether `busy` is recorded: only while the slab is large
+    /// (`BUSY_TRACKING_MIN` wavefronts), so short alignments on a small slab
+    /// don't pay for it.
+    track_busy: bool,
     /// Total memory used in bytes.
     memory_used: u64,
     /// Arena for all per-wavefront arrays (offsets, bt_pcigar, bt_prev). No zeroing.
@@ -86,6 +100,8 @@ impl WavefrontSlab {
             free_list: Vec::with_capacity(32),
             dealloc_list: Vec::new(),
             mixed_lengths: false,
+            busy: Vec::with_capacity(128),
+            track_busy: false,
             memory_used: 0,
             arena: ByteArena::new(arena_capacity),
             oversize_arena: ByteArena::new(1 << 20),
@@ -135,6 +151,7 @@ impl WavefrontSlab {
                 if let Some(idx) = self.free_list.pop() {
                     self.wavefronts[idx].status = WavefrontStatus::Busy;
                     self.wavefronts[idx].init(min_lo, max_hi);
+                    self.record_busy(idx);
                     idx
                 } else {
                     self.allocate_new(self.current_wf_length, min_lo, max_hi)
@@ -145,6 +162,7 @@ impl WavefrontSlab {
                     if let Some(idx) = self.free_list.pop() {
                         self.wavefronts[idx].status = WavefrontStatus::Busy;
                         self.wavefronts[idx].init(min_lo, max_hi);
+                        self.record_busy(idx);
                         idx
                     } else {
                         self.allocate_new(self.init_wf_length, min_lo, max_hi)
@@ -161,7 +179,12 @@ impl WavefrontSlab {
     pub fn reuse_inplace(&mut self, idx: WavefrontIdx, min_lo: i32, max_hi: i32) {
         let wf = unsafe { self.wavefronts.get_unchecked_mut(idx) };
         wf.init(min_lo, max_hi);
-        wf.status = WavefrontStatus::Busy;
+        if wf.status != WavefrontStatus::Busy {
+            wf.status = WavefrontStatus::Busy;
+            if self.track_busy {
+                self.busy.push(idx);
+            }
+        }
     }
 
     /// Reuse an existing wavefront or allocate a new one (index-based).
@@ -194,6 +217,9 @@ impl WavefrontSlab {
             self.wavefronts[idx].status = WavefrontStatus::Free;
             self.free_list.push(idx);
         } else {
+            // Only a non-standard length is deallocated, so the slab is
+            // already marked mixed (C's `dirty`) and the next reap walks it all.
+            debug_assert!(self.mixed_lengths);
             self.memory_used -= self.wavefronts[idx].get_size();
             self.wavefronts[idx].status = WavefrontStatus::Deallocated;
             self.dealloc_list.push(idx);
@@ -237,17 +263,37 @@ impl WavefrontSlab {
             }
             self.oversize_arena.reset();
             self.mixed_lengths = false;
+            self.busy.clear();
+            self.track_busy = self.wavefronts.len() >= BUSY_TRACKING_MIN;
             return;
         }
         // Do NOT reset current_wf_length: wavefronts on the free list are already
         // sized at current_wf_length, so allocate() can reuse them directly.
-        self.free_list.clear();
-        for (i, wf) in self.wavefronts.iter_mut().enumerate() {
-            if wf.status != WavefrontStatus::Deallocated {
-                wf.status = WavefrontStatus::Free;
-                self.free_list.push(i);
+        // Only the wavefronts handed out since the last reap can be busy; the
+        // rest are on the free list already. When they are a small part of
+        // the slab (short alignments after a long one), return just those.
+        // Otherwise rebuild the free list in index order, as before: about
+        // the same work, and later alignments then reuse wavefronts in
+        // memory order.
+        if self.track_busy && self.busy.len() * 4 < self.wavefronts.len() {
+            for &i in &self.busy {
+                let wf = &mut self.wavefronts[i];
+                if wf.status == WavefrontStatus::Busy {
+                    wf.status = WavefrontStatus::Free;
+                    self.free_list.push(i);
+                }
+            }
+        } else {
+            self.free_list.clear();
+            for (i, wf) in self.wavefronts.iter_mut().enumerate() {
+                if wf.status != WavefrontStatus::Deallocated {
+                    wf.status = WavefrontStatus::Free;
+                    self.free_list.push(i);
+                }
             }
         }
+        self.busy.clear();
+        self.track_busy = self.wavefronts.len() >= BUSY_TRACKING_MIN;
         // Arena NOT reset: offset/bt arrays remain valid; compute kernels
         // write before read so no zeroing is needed.
     }
@@ -259,6 +305,8 @@ impl WavefrontSlab {
         self.wavefronts.clear();
         self.free_list.clear();
         self.dealloc_list.clear();
+        self.busy.clear();
+        self.track_busy = false;
         self.mixed_lengths = false;
         self.memory_used = 0;
         self.arena.reset();
@@ -272,6 +320,8 @@ impl WavefrontSlab {
         self.wavefronts.clear();
         self.free_list.clear();
         self.dealloc_list.clear();
+        self.busy.clear();
+        self.track_busy = false;
         self.mixed_lengths = false;
         self.memory_used = 0;
         self.arena.reset();
@@ -390,6 +440,13 @@ impl WavefrontSlab {
 
     // --- Internal ---
 
+    #[inline(always)]
+    fn record_busy(&mut self, idx: WavefrontIdx) {
+        if self.track_busy {
+            self.busy.push(idx);
+        }
+    }
+
     fn allocate_new(&mut self, wf_length: i32, min_lo: i32, max_hi: i32) -> WavefrontIdx {
         let oversize = self.slab_mode == SlabMode::Tight && wf_length != self.init_wf_length;
         let arena = if oversize {
@@ -404,6 +461,7 @@ impl WavefrontSlab {
         self.memory_used += wf.get_size();
         if let Some(idx) = self.dealloc_list.pop() {
             self.wavefronts[idx] = wf;
+            self.record_busy(idx);
             return idx;
         }
         let idx = self.wavefronts.len();
@@ -413,6 +471,7 @@ impl WavefrontSlab {
             "wavefront slab Vec would reallocate (len {idx})"
         );
         self.wavefronts.push(wf);
+        self.record_busy(idx);
         idx
     }
 
@@ -464,6 +523,9 @@ impl WavefrontSlab {
         }
         self.wavefronts.truncate(valid_idx);
         self.dealloc_list.clear();
+        // Compaction moved wavefronts, and all of them are free now.
+        self.busy.clear();
+        self.track_busy = self.wavefronts.len() >= BUSY_TRACKING_MIN;
         self.mixed_lengths = false;
         // Only current-length wavefronts remain, none from the oversize arena.
         self.oversize_arena.reset();
@@ -585,6 +647,50 @@ mod tests {
         // Write and read to verify bt arrays are valid
         wf.set_bt_pcigar(0, 0xDEAD);
         assert_eq!(wf.get_bt_pcigar(0), 0xDEAD);
+    }
+
+    /// After a large alignment, `reap_cigar` returns only the wavefronts the
+    /// next ones used (Marco-Sola-Lab/WFA2-lib#140), and every live wavefront
+    /// ends up free exactly once, as with the full walk.
+    #[test]
+    fn test_reap_cigar_busy_after_large_slab() {
+        let mut slab = WavefrontSlab::new(10, false, SlabMode::Tight);
+        let n = BUSY_TRACKING_MIN + 100;
+        slab.reserve(n);
+        let check = |slab: &WavefrontSlab| {
+            let mut free = slab.free_list.clone();
+            free.sort_unstable();
+            free.dedup();
+            assert_eq!(
+                free.len(),
+                slab.free_list.len(),
+                "duplicates on the free list"
+            );
+            assert_eq!(free.len(), slab.num_wavefronts());
+            assert!(
+                slab.wavefronts
+                    .iter()
+                    .all(|w| w.status == WavefrontStatus::Free)
+            );
+        };
+        // A large alignment: not tracked, so a full walk.
+        for _ in 0..n {
+            slab.allocate(0, 5);
+        }
+        slab.reap_cigar();
+        check(&slab);
+        assert!(slab.track_busy);
+        // Short alignments: allocate, free some, reap only the busy ones.
+        for _ in 0..3 {
+            let a: Vec<_> = (0..50).map(|_| slab.allocate(0, 5)).collect();
+            slab.free(a[10]);
+            slab.free(a[20]);
+            assert_eq!(slab.busy.len(), 50);
+            slab.reap_cigar();
+            check(&slab);
+            assert!(slab.busy.is_empty());
+        }
+        assert_eq!(slab.num_wavefronts(), n);
     }
 
     #[test]
