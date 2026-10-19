@@ -599,6 +599,23 @@ impl<const N: usize> WavefrontAligner<N> {
         self.extension = true;
     }
 
+    /// Configure end-to-end (global) alignment, the default (C's
+    /// `wavefront_aligner_set_alignment_end_to_end`).
+    ///
+    /// Undoes [`Self::set_alignment_free_ends`] and
+    /// [`Self::set_alignment_extension`]. [`Self::align_end2end`] is always
+    /// end-to-end; this also sets the free-end limits to 0, so
+    /// [`Self::align_endsfree`] is end-to-end too, as C's `wavefront_align`
+    /// follows the span.
+    pub fn set_alignment_end_to_end(&mut self) {
+        self.alignment_span = AlignmentSpan::End2End;
+        self.extension = false;
+        self.pattern_begin_free = 0;
+        self.pattern_end_free = 0;
+        self.text_begin_free = 0;
+        self.text_end_free = 0;
+    }
+
     /// Choose C-compatible output (the default) or corrected behaviour for
     /// known C WFA2-lib bugs (see [`Compat`]).
     pub fn set_compat(&mut self, compat: Compat) {
@@ -3831,6 +3848,17 @@ mod tests {
                     );
                     // The ends-free setting is kept for later ends-free calls
                     assert_eq!(a.alignment_span, AlignmentSpan::EndsFree);
+
+                    // Until it is undone: then ends-free calls are
+                    // end-to-end too
+                    a.set_alignment_end_to_end();
+                    assert_eq!(a.alignment_span, AlignmentSpan::End2End);
+                    assert_eq!(a.align_endsfree(pattern, text), want, "{compat:?}");
+                    assert_eq!(
+                        a.cigar().to_string_rle(true),
+                        fresh.cigar().to_string_rle(true),
+                        "{compat:?}"
+                    );
                 }
             }
         }

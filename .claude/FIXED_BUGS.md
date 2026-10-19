@@ -637,6 +637,8 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   follows it.
 - **Fix:** `align_end2end_inner` runs with an end-to-end span and restores
   the previous one, so later `align_endsfree` calls keep their settings.
+  Also adds C's missing setter, `set_alignment_end_to_end`, which resets the
+  span (and the free-end limits, so `align_endsfree` is end-to-end too).
 - **Test:** `aligner::tests::test_end2end_ignores_free_ends` (linear,
   match −5 and 0, both compat modes; fails without the fix). CLI output is
   unchanged.
