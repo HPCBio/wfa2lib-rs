@@ -221,3 +221,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
 - **2026-10-18:** begin-free ends-free cost (HPCBio/dada2-rs#51) investigated:
   inherent step count, not prunable exactly; two per-step overhead cuts
   (short NULL fills, banded cutoff fast path) give 9–16% on dada2-like pairs.
+- **2026-10-18:** begin-free dominance pruning (HPCBio/wfa2lib-rs#31,
+  correcting the entry above): seeded lineages are mostly dominated cells,
+  which corrected mode now trims exactly (gap-linear always; affine/affine2p
+  up to a begin-free limit of 4). Linear ends-free 0.47–0.95× on dada2-like
+  pairs; dada2-rs real data identical and its full-bound linear cost halved.
