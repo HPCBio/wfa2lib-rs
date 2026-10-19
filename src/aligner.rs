@@ -599,6 +599,23 @@ impl<const N: usize> WavefrontAligner<N> {
         self.extension = true;
     }
 
+    /// Configure end-to-end (global) alignment, the default (C's
+    /// `wavefront_aligner_set_alignment_end_to_end`).
+    ///
+    /// Undoes [`Self::set_alignment_free_ends`] and
+    /// [`Self::set_alignment_extension`]. [`Self::align_end2end`] is always
+    /// end-to-end; this also sets the free-end limits to 0, so
+    /// [`Self::align_endsfree`] is end-to-end too, as C's `wavefront_align`
+    /// follows the span.
+    pub fn set_alignment_end_to_end(&mut self) {
+        self.alignment_span = AlignmentSpan::End2End;
+        self.extension = false;
+        self.pattern_begin_free = 0;
+        self.pattern_end_free = 0;
+        self.text_begin_free = 0;
+        self.text_end_free = 0;
+    }
+
     /// Choose C-compatible output (the default) or corrected behaviour for
     /// known C WFA2-lib bugs (see [`Compat`]).
     pub fn set_compat(&mut self, compat: Compat) {
@@ -623,6 +640,17 @@ impl<const N: usize> WavefrontAligner<N> {
 
     /// Shared end-to-end alignment loop (sequences must already be initialized).
     fn align_end2end_inner(&mut self) -> i32 {
+        // End-to-end whatever the span set: an earlier
+        // `set_alignment_free_ends` must not add begin-free cells here. The
+        // span is restored for later ends-free calls.
+        let span = std::mem::replace(&mut self.alignment_span, AlignmentSpan::End2End);
+        let score = self.align_end2end_span();
+        self.alignment_span = span;
+        score
+    }
+
+    /// [`Self::align_end2end_inner`] with the span set to end-to-end.
+    fn align_end2end_span(&mut self) -> i32 {
         // Init alignment
         self.init_alignment();
 
@@ -3780,6 +3808,60 @@ mod tests {
         a.set_alignment_extension();
         a.align_endsfree(b"TTTTTACGTACGTACGT", b"ACGTACGTACGT");
         assert!(!a.cigar().to_string_rle(true).starts_with("5D"));
+    }
+
+    #[test]
+    fn test_end2end_ignores_free_ends() {
+        // End-to-end alignment on an aligner previously set to ends-free
+        // used its begin-free limits: with a match reward the begin-free
+        // seeds were still added, and a leading gap was charged as a
+        // free skip. Each result must equal a fresh aligner's.
+        let pairs: [(&[u8], &[u8]); 2] = [
+            (b"AACGTTGCATGCAGT", b"ACGTTGCATGCAGT"),
+            (b"ACGTTGCATGCAGT", b"GGACGTTGCATGCAGT"),
+        ];
+        let linear = |match_| {
+            WavefrontPenalties::new_linear(crate::penalties::LinearPenalties {
+                match_,
+                mismatch: 4,
+                indel: 8,
+            })
+        };
+        for pen in [linear(-5), linear(0)] {
+            for compat in [Compat::C, Compat::Corrected] {
+                for (pattern, text) in pairs {
+                    let mut fresh = WavefrontAligner::<1>::new(pen.clone());
+                    fresh.set_compat(compat);
+                    fresh.set_alignment_scope(AlignmentScope::ComputeAlignment);
+                    let want = fresh.align_end2end(pattern, text);
+
+                    let mut a = WavefrontAligner::<1>::new(pen.clone());
+                    a.set_compat(compat);
+                    a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+                    a.set_alignment_free_ends(3, 3, 3, 3);
+                    a.align_endsfree(pattern, text);
+                    assert_eq!(a.align_end2end(pattern, text), want, "{compat:?}");
+                    assert_eq!(
+                        a.cigar().to_string_rle(true),
+                        fresh.cigar().to_string_rle(true),
+                        "{compat:?}"
+                    );
+                    // The ends-free setting is kept for later ends-free calls
+                    assert_eq!(a.alignment_span, AlignmentSpan::EndsFree);
+
+                    // Until it is undone: then ends-free calls are
+                    // end-to-end too
+                    a.set_alignment_end_to_end();
+                    assert_eq!(a.alignment_span, AlignmentSpan::End2End);
+                    assert_eq!(a.align_endsfree(pattern, text), want, "{compat:?}");
+                    assert_eq!(
+                        a.cigar().to_string_rle(true),
+                        fresh.cigar().to_string_rle(true),
+                        "{compat:?}"
+                    );
+                }
+            }
+        }
     }
 
     // --- Gap-linear tests ---
