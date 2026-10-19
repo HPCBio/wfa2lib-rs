@@ -619,3 +619,24 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   high/med/low, end-to-end and ends-free, BiWFA); fails without the fix.
   The whole suite now also passes in debug.
 
+
+## 16. End-to-end alignment kept earlier ends-free settings (Rust bug)
+
+- **Symptom:** on an aligner reused after `set_alignment_free_ends` with
+  begin-free limits, `align_end2end` (and `align_lambda`,
+  `align_packed2bits`) could return a suboptimal score and a CIGAR starting
+  with a gap. Found by dada2-rs (HPCBio/dada2-rs#289), which caches one
+  aligner per thread: real PacBio pairs scored 3 points below NW's global
+  optimum after an ends-free pass. Both compat modes; the CLI and the
+  differential harness never mix the two on one aligner.
+- **Root cause:** `set_alignment_free_ends` sets the span to ends-free and
+  nothing reset it, so end-to-end alignment still seeded the begin-free
+  cells (at score `k · |match|`, or 0 with `match == 0`): a leading gap was
+  taken as a free skip. Since #60 the dominance pruning was enabled too.
+  C has no such state: its span is the aligner's, and `wavefront_align`
+  follows it.
+- **Fix:** `align_end2end_inner` runs with an end-to-end span and restores
+  the previous one, so later `align_endsfree` calls keep their settings.
+- **Test:** `aligner::tests::test_end2end_ignores_free_ends` (linear,
+  match −5 and 0, both compat modes; fails without the fix). CLI output is
+  unchanged.
