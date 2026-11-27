@@ -189,8 +189,7 @@ By default output is identical to C, including results C gets wrong. With
 `--no-c-compat` (library: `set_compat(Compat::Corrected)`), known C bugs are
 fixed instead. Currently this covers ends-free alignment with a match reward
 (`match < 0`), where C can return a suboptimal alignment (corrected mode
-returns the optimal one), X-drop with `steps_between_cutoffs > 1`, where C
-can return an invalid CIGAR, and Z-drop, where C backtraces the partial
+returns the optimal one), and Z-drop, where C backtraces the partial
 alignment from the wrong score (empty or invalid CIGARs, and results that
 differ between memory modes). With `match == 0` (the default penalties), it
 also fixes the sign of the score X-drop and Z-drop use, which in C makes
