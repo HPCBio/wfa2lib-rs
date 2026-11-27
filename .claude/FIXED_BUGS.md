@@ -642,3 +642,38 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
 - **Test:** `aligner::tests::test_end2end_ignores_free_ends` (linear,
   match −5 and 0, both compat modes; fails without the fix). CLI output is
   unchanged.
+
+## 17. Indel alignments past the edit bound failed in high memory (Rust bug, C 6fb3fa6)
+
+- **Symptom:** high-memory indel alignment of dissimilar sequences returned
+  no alignment: `A*1500` vs `C*1500` gave `-1` and an empty CIGAR (C:
+  `3000 1500I1500D`). Only high memory: med/low use modular arrays, and
+  BiWFA's sub-alignments stay small (all three were already right).
+- **Root cause:** the per-score wavefront arrays held `max(|P|,|T|) + 1`
+  entries for both edit and indel, as in C before 6fb3fa6. That bounds the
+  edit distance, but the indel distance (no mismatches) reaches `|P|+|T|`.
+  C wrote past the array (heap overflow); Rust's range check stopped the
+  alignment instead.
+- **Fix:** `WavefrontComponents::compute_dimensions` sizes indel arrays
+  `|P| + |T| + 1`, as C 6fb3fa6 (Marco-Sola-Lab/WFA2-lib#151).
+- **Test:** `aligner::tests::test_indel_score_beyond_edit_bound` (high, med,
+  low, BiWFA; high fails without the fix).
+
+## 18. BiWFA scores: empty sequences, and `cigar().score` unset (Rust bug, C c09ee80)
+
+- **Symptom:** `align_biwfa` returned 0 when the pattern or the text was
+  empty (e.g. `ACGT` vs empty, gap-affine 0,4,6,2: 0 instead of 14), and
+  `cigar().score` stayed `i32::MIN` after every BiWFA alignment, while
+  unidirectional alignment sets it to the returned score. The CLI scores
+  CIGARs itself, so its output was right.
+- **Root cause:** the trivial case appends the gap without aligning and
+  returned 0; C did the same before c09ee80, leaving `INT32_MIN`. The
+  top-level score was returned but never stored in the CIGAR (C sets
+  `cigar->score` at level 0).
+- **Fix:** at the top level, an empty-sequence alignment is scored from its
+  CIGAR (`cigar_wfa_score`: the penalty, or Eizenga's transform with a match
+  reward), and the score is stored in `cigar().score`.
+- **Test:** `aligner::tests::test_biwfa_scores_match_end2end` (edit, indel,
+  linear, affine, affine2p; match 0 and < 0; BiWFA equals `align_end2end`;
+  fails without the fix).
+

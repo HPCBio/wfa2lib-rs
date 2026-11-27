@@ -2478,6 +2478,15 @@ impl<const N: usize> WavefrontAligner<N> {
         // whatever was appended before it.
         let score = match result {
             Ok(score) => {
+                // An empty pattern or text is a single gap, appended without
+                // aligning, so it has no wavefront score: score its CIGAR
+                // (as C since c09ee80; C before it left INT32_MIN).
+                let score = if plen == 0 || tlen == 0 {
+                    self.cigar_wfa_score(&self.cigar, plen, tlen)
+                } else {
+                    score
+                };
+                self.cigar.score = score;
                 self.cigar.end_v = plen;
                 self.cigar.end_h = tlen;
                 self.status = AlignStatus::Completed;
@@ -2554,6 +2563,31 @@ impl<const N: usize> WavefrontAligner<N> {
     /// creating them on first use; callers put them back. fwd/rev use modular
     /// storage; base uses full CIGAR storage.
     #[allow(clippy::type_complexity)]
+    /// The WFA score (what the `align_*` methods return) of a global
+    /// alignment's `cigar` of a `plen` × `tlen` pair: its penalty, or with a
+    /// match reward, Eizenga's transform of its classic score (the inverse of
+    /// [`WavefrontPenalties::wf_score_to_sw_score`]).
+    fn cigar_wfa_score(&self, cigar: &Cigar, plen: i32, tlen: i32) -> i32 {
+        let p = &self.penalties;
+        let classic = match p.distance_metric {
+            DistanceMetric::Indel | DistanceMetric::Edit => return cigar.score_edit(),
+            DistanceMetric::GapLinear => {
+                cigar.score_gap_linear(p.linear_penalties.as_ref().unwrap())
+            }
+            DistanceMetric::GapAffine => {
+                cigar.score_gap_affine(p.affine_penalties.as_ref().unwrap())
+            }
+            DistanceMetric::GapAffine2p => {
+                cigar.score_gap_affine2p(p.affine2p_penalties.as_ref().unwrap())
+            }
+        };
+        if p.match_ < 0 {
+            -p.match_ * (plen + tlen) - 2 * classic
+        } else {
+            -classic
+        }
+    }
+
     fn take_biwfa_subs(&mut self) -> (Box<Self>, Box<Self>, Box<Self>) {
         if self.biwfa_fwd.is_none() {
             self.biwfa_fwd = Some(Box::new(Self::new_biwfa_sub(self.penalties.clone())));
@@ -4223,6 +4257,76 @@ mod tests {
                 biwfa_aligner.cigar().end_offset,
             );
         }
+    }
+
+    /// BiWFA's score and `cigar().score` equal unidirectional WFA's, also
+    /// when one sequence is empty (BiWFA appends that gap without aligning;
+    /// it returned 0 and left `cigar().score` unset, as C before c09ee80).
+    fn check_biwfa_scores<const N: usize>(pen: WavefrontPenalties) {
+        let pairs: [(&[u8], &[u8]); 4] = [
+            (b"ACGT", b""),
+            (b"", b"TG"),
+            (b"ACGT", b"AGT"),
+            (b"GATTACA", b"GATCACAT"),
+        ];
+        for (p, t) in pairs {
+            let mut uni = WavefrontAligner::<N>::new(pen.clone());
+            uni.set_alignment_scope(AlignmentScope::ComputeAlignment);
+            let expected = uni.align_end2end(p, t);
+            let mut bi = WavefrontAligner::<N>::new(pen.clone());
+            let score = bi.align_biwfa(p, t);
+            let case = format!("{} {:?}/{:?}", pen, p, t);
+            assert_eq!(score, expected, "{case}");
+            assert_eq!(bi.cigar().score, expected, "{case}");
+            assert_eq!(bi.status, AlignStatus::Completed, "{case}");
+            bi.cigar().check_alignment(p, t).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_biwfa_scores_match_end2end() {
+        use crate::penalties::{Affine2pPenalties, AffinePenalties, LinearPenalties};
+        check_biwfa_scores::<1>(WavefrontPenalties::new_edit());
+        check_biwfa_scores::<1>(WavefrontPenalties::new_indel());
+        for match_ in [0, -1] {
+            check_biwfa_scores::<1>(WavefrontPenalties::new_linear(LinearPenalties {
+                match_,
+                mismatch: 4,
+                indel: 2,
+            }));
+            check_biwfa_scores::<3>(WavefrontPenalties::new_affine(AffinePenalties {
+                match_: 3 * match_,
+                mismatch: 5,
+                gap_opening: 3,
+                gap_extension: 2,
+            }));
+            check_biwfa_scores::<5>(WavefrontPenalties::new_affine2p(Affine2pPenalties {
+                match_,
+                mismatch: 4,
+                gap_opening1: 6,
+                gap_extension1: 2,
+                gap_opening2: 24,
+                gap_extension2: 1,
+            }));
+        }
+    }
+
+    /// Indel distance reaches |P|+|T| (no mismatches), past the edit bound
+    /// max(|P|,|T|) high memory sized its wavefront array by: the alignment
+    /// failed (C overflowed the array until 6fb3fa6).
+    #[test]
+    fn test_indel_score_beyond_edit_bound() {
+        let (p, t) = (vec![b'A'; 1500], vec![b'C'; 1500]);
+        for mode in [MemoryMode::High, MemoryMode::Med, MemoryMode::Low] {
+            let mut a = EditAligner::new(WavefrontPenalties::new_indel());
+            a.set_memory_mode(mode);
+            a.set_alignment_scope(AlignmentScope::ComputeAlignment);
+            assert_eq!(a.align_end2end(&p, &t), 3000, "{mode:?}");
+            assert_eq!(a.status, AlignStatus::Completed, "{mode:?}");
+            assert_eq!(a.cigar().to_string_rle(true), "1500I1500D", "{mode:?}");
+        }
+        let mut a = EditAligner::new(WavefrontPenalties::new_indel());
+        assert_eq!(a.align_biwfa(&p, &t), 3000);
     }
 
     #[test]
