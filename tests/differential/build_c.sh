@@ -23,7 +23,7 @@ DEST="$ROOT/target/differential/c-$COMMIT${C_NATIVE:+-native-$(hostname -s)}"
 BIN="$DEST/bin/align_benchmark"
 
 # Bump when the build recipe below changes, so cached builds are redone.
-RECIPE=2
+RECIPE=3
 STAMP="$DEST/.build_c-recipe"
 
 if [ -x "$BIN" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$RECIPE" ]; then
@@ -56,6 +56,21 @@ drop_flag() { # pattern
 }
 if [ -z "${C_NATIVE:-}" ]; then
   drop_flag '-march=native'
+  # Some toolchains enable AVX2 without -march=native (gcc 15 on the
+  # ubuntu-26.04 runners does), which compiles C's AVX2 kernels in anyway:
+  # turn it off explicitly on x86, and refuse to build if it is still on.
+  case "$(uname -m)" in
+    x86_64|amd64)
+      if echo | ${CC:-cc} -dM -E - | grep -q '__AVX2__'; then
+        echo "build_c.sh: ${CC:-cc} enables AVX2 by default; disabling it" >&2
+      fi
+      CC="${CC:-cc} -mno-avx2 -mno-avx512f"
+      export CC
+      if echo | $CC -dM -E - | grep -q '__AVX2__'; then
+        echo "build_c.sh: $CC still defines __AVX2__" >&2; exit 1
+      fi
+      ;;
+  esac
 fi
 if [ "$(uname)" = Darwin ]; then
   drop_flag '-fopenmp'
