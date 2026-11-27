@@ -224,8 +224,8 @@ impl Cigar {
         let mut end_v = 0i32;
         let mut end_h = 0i32;
 
-        for i in begin..end {
-            match self.operations[i] {
+        for (i, &op) in self.operations.iter().enumerate().take(end).skip(begin) {
+            match op {
                 b'M' => {
                     score -= match_score;
                     end_v += 1;
@@ -290,8 +290,7 @@ impl Cigar {
         let mut end_v = 0i32;
         let mut end_h = 0i32;
 
-        for i in begin..end {
-            let op = self.operations[i];
+        for (i, &op) in self.operations.iter().enumerate().take(end).skip(begin) {
             match op {
                 b'M' => {
                     score -= match_score;
@@ -364,8 +363,7 @@ impl Cigar {
         let mut end_h = 0i32;
         let mut op_length = 0i32;
 
-        for i in begin..end {
-            let operation = self.operations[i];
+        for (i, &operation) in self.operations.iter().enumerate().take(end).skip(begin) {
             if operation != last_op && last_op != 0 {
                 score -= Self::maxtrim_affine2p_op_score(
                     last_op, op_length, penalties, &mut end_v, &mut end_h,

@@ -124,12 +124,8 @@ impl ByteArena {
 
     /// Current memory used in bytes (approximate).
     pub fn used_bytes(&self) -> usize {
-        let mut total = 0;
-        for i in 0..self.current_chunk {
-            total += self.chunks[i].1;
-        }
-        total += self.cursor;
-        total
+        let full: usize = self.chunks[..self.current_chunk].iter().map(|c| c.1).sum();
+        full + self.cursor
     }
 
     /// Total capacity in bytes across all chunks.
