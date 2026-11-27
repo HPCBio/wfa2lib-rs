@@ -441,8 +441,13 @@ impl<const N: usize> WavefrontComponents<N> {
         match penalties.distance_metric {
             DistanceMetric::Indel | DistanceMetric::Edit => {
                 let max_score_scope = 2;
+                // As C's `wavefront_components_dimensions_edit` (since 6fb3fa6):
+                // the edit distance is at most max(|P|,|T|), but the indel
+                // distance (no mismatches: X = I + D) reaches |P|+|T|.
                 let num_wavefronts = if memory_modular {
                     2
+                } else if penalties.distance_metric == DistanceMetric::Indel {
+                    (max_pattern_length + max_text_length) as usize + 1
                 } else {
                     max_pattern_length.max(max_text_length) as usize + 1
                 };
