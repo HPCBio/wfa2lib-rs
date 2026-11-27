@@ -367,12 +367,12 @@ impl Wavefront {
         }
     }
 
-    /// Empty the initialized range, so the backtrace reads no cell of this
-    /// wavefront (corrected mode, for one a heuristic trimmed empty:
-    /// HPCBio/wfa2lib-rs#21).
+    /// Empty the initialized range of a wavefront a heuristic trimmed empty
+    /// (`lo > hi`), so the backtrace reads none of its cells (as C since
+    /// 0285b52, which sets it to `[lo, hi]`; HPCBio/wfa2lib-rs#21).
     pub(crate) fn clear_init_range(&mut self) {
-        self.wf_elements_init_min = 1;
-        self.wf_elements_init_max = 0;
+        self.wf_elements_init_min = self.lo;
+        self.wf_elements_init_max = self.hi;
     }
 
     /// Extend the written range to cover `[lo, hi]`.

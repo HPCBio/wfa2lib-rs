@@ -474,6 +474,10 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   empty, also empty its initialized range (`Wavefront::clear_init_range`),
   so the backtrace reads it as null, as compute does. Scores are unchanged
   in all modes.
+- **Upstream (2026-11-27):** reported as Marco-Sola-Lab/WFA2-lib#145 and
+  merged as Marco-Sola-Lab/WFA2-lib#146 (C 0285b52, add8f26), which sets the
+  empty range to `[lo, hi]`. Now unconditional, with C's values; pinned C
+  is add8f26.
 - **Result:** X-drop `50,10` / `100,5` × affine / linear / affine2p ×
   {`wfa.utest.seq`, `long.seq`}: every non-empty CIGAR is valid (C mode:
   e.g. affine `100,5` on `long.seq` 0/300 valid). Score-only output
@@ -483,7 +487,8 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   source was pruned. The CIGAR merges them into one gap, so it rescores
   below the WFA score (never above): e.g. pair 298, affine `100,5`, 242 vs
   248. C's valid CIGARs show the same (affine2p `50,10`: 5/305 pairs).
-- **Tests:** `tests/corrected_xdrop.rs` (all three gap metrics). First pair
+- **Tests:** `tests/xdrop_steps.rs` (was `corrected_xdrop.rs`; all three
+  gap metrics, both modes now valid and identical). First pair
   201 with default penalties; since 14f changes X-drop's scores at
   `match == 0`, pair 305 (`tests/data/issue21_xdrop.seq`) with match-reward
   penalties and X-drop `20,2`.

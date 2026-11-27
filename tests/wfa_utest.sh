@@ -73,7 +73,7 @@ run_test() {
     compare "$outfile" "$reffile" "${name}.${suffix}"
 }
 
-# Run all 12 combos for a given mode
+# Run all 13 combos for a given mode
 run_mode() {
     local mode_flags="$1"
     local name="$2"
@@ -96,6 +96,7 @@ run_mode() {
     # Heuristics
     run_test "$mode_flags" "$name" "gap-affine-wfa" "affine.wfapt0" "--wfa-heuristic=wfa-adaptive --wfa-heuristic-parameters=10,50,1"
     run_test "$mode_flags" "$name" "gap-affine-wfa" "affine.wfapt1" "--wfa-heuristic=wfa-adaptive --wfa-heuristic-parameters=10,50,10"
+    run_test "$mode_flags" "$name" "gap-affine-wfa" "affine.xdrop" "--affine-penalties=-2,3,1,4 --wfa-heuristic=xdrop --wfa-heuristic-parameters=20,2"
 }
 
 # Run all 5 modes

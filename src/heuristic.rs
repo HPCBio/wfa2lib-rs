@@ -24,12 +24,9 @@ pub enum HeuristicStrategy {
     /// X-Drop: prune diagonals whose Smith-Waterman score has dropped `xdrop`
     /// or more below the best score seen, every `steps_between_cutoffs` steps.
     ///
-    /// **Known issue (parity with C WFA2-lib):** with `steps_between_cutoffs > 1`
-    /// the CIGAR can be invalid (C's backtrace reads wavefronts the cutoff
-    /// trimmed to empty, HPCBio/wfa2lib-rs#21). Scores are unaffected, and
-    /// `steps_between_cutoffs == 1` produces valid CIGARs. With `match == 0`,
-    /// C's score makes progress look like a drop, so the diagonals that
-    /// progress most are pruned (HPCBio/wfa2lib-rs#55). Both fixed by
+    /// **Known issue (parity with C WFA2-lib):** with `match == 0`, C's score
+    /// makes progress look like a drop, so the diagonals that progress most
+    /// are pruned (HPCBio/wfa2lib-rs#55). Fixed by
     /// [`crate::aligner::Compat::Corrected`].
     XDrop {
         xdrop: i32,
@@ -497,6 +494,7 @@ pub fn heuristic_equate(dst: &mut Wavefront, src: &Wavefront) {
     }
     if dst.lo > dst.hi {
         dst.null = true;
+        dst.clear_init_range();
     }
 }
 

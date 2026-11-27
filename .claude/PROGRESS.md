@@ -33,11 +33,11 @@ Checked with `tests/differential/run.sh` (1262 cases against the C commit in
 | Configuration | vs C |
 |---|---|
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
-| Stock `wfa.utest.sh` | 60/60 identical (BiWFA match < 0 tie-breaks fixed, HPCBio/wfa2lib-rs#7) |
+| Stock `wfa.utest.sh` | 65/65 identical at C add8f26, incl. its X-drop line (BiWFA match < 0 tie-breaks fixed, HPCBio/wfa2lib-rs#7) |
 | banded-static (affine, affine2p, linear) | Byte-identical to C 3282f83 (with Marco-Sola-Lab/WFA2-lib#125's band clamp) in high / med / score-only modes, including unreachable pairs |
 | banded-static (edit, indel) | Rust stops as unreachable; C never terminates (C bug, HPCBio/wfa2lib-rs#24) |
 | banded-adaptive | C's re-centred band ported (HPCBio/wfa2lib-rs#6): byte-identical to C 3282f83 in high / score-only / med / low (48/48) |
-| xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 3282f83 in high / score-only / med (556/576 matrix cells). The other 20 are Z-drop `med` with match < 0, where C reads uninitialized memory (HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#21, HPCBio/wfa2lib-rs#23 |
+| xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 3282f83 in high / score-only / med (556/576 matrix cells). The other 20 are Z-drop `med` with match < 0, where C reads uninitialized memory (HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#23 (HPCBio/wfa2lib-rs#21 fixed in C add8f26) |
 | BiWFA + any heuristic | Byte-identical to C 3282f83 (168/168: banded-static/adaptive, xdrop, zdrop, wfa-adaptive; CIGAR and score-only; HPCBio/wfa2lib-rs#6) |
 | `--wfa-memory=med\|low` (piggyback backtrace) | Byte-identical to C 3282f83 for all metrics (28/28 matrix cells, 50k × 1 kb), with heuristics as above (HPCBio/wfa2lib-rs#8) |
 | extension; ends-free with end gaps only | Byte-identical to C (all metrics incl. match < 0, alignment and score-only) |
@@ -65,18 +65,18 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   bounds check made the alignment fail instead of overflowing (FIXED_BUGS 17).
 - [x] c09ee80 (Marco-Sola-Lab/WFA2-lib#151): BiWFA score with an empty
   sequence. Rust returned 0 and never set `cigar().score` (FIXED_BUGS 18).
-- [ ] Rest of 8a302a4 (Marco-Sola-Lab/WFA2-lib#146, #150 Singletrack, #151
-  heuristics): assessed 2026-11-27, to be ported in steps (#21 pin, #151
-  heuristics in C mode, BiWFA rejects X/Z-drop, Singletrack).
+- [x] 0285b52 / add8f26 (Marco-Sola-Lab/WFA2-lib#146, our report #145): a
+  wavefront a heuristic cutoff trims to empty gets an empty initialized
+  range, so X-drop with steps > 1 gives valid CIGARs (HPCBio/wfa2lib-rs#21).
+  Was corrected-mode only; now unconditional. Pinned C 6176f94 → add8f26.
+- [ ] Rest of 8a302a4 (Marco-Sola-Lab/WFA2-lib#150 Singletrack, #151
+  heuristics): assessed 2026-11-27, to be ported in steps (#151 heuristics
+  in C mode, BiWFA rejects X/Z-drop, Singletrack).
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and
   C++-binding commits.
 
 ### Known issues kept for C parity
 
-- HPCBio/wfa2lib-rs#21: X-drop with `steps_between_cutoffs > 1` returns invalid
-  CIGARs (C's high-memory backtrace reads wavefronts trimmed to empty; C's
-  `med` is valid). **Fixed in corrected mode** (`Compat::Corrected`;
-  FIXED_BUGS 14d).
 - HPCBio/wfa2lib-rs#22: Z-drop results differ between C's high-memory and `med`
   modes. Root cause: in `med`/`low`, C backtraces from the end diagonal at
   the current score, often a dead cell whose chain comes from uninitialized
@@ -238,3 +238,7 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   suite at three commits (add8f26, 8702abe, 8a302a4). Fixed two Rust bugs
   found on the way: indel high-memory sizing (6fb3fa6) and BiWFA scores
   (c09ee80). Output vs the pinned C unchanged.
+- **2026-11-27:** C `C_COMMIT` 6176f94 → add8f26. Marco-Sola-Lab/WFA2-lib#146
+  (our fix for HPCBio/wfa2lib-rs#21) merged upstream, so the fix is
+  unconditional, with C's `[lo, hi]` empty range. Differential suite: only
+  the 20 known #22 diffs.
