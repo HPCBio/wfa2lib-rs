@@ -10,6 +10,7 @@ use crate::cigar::Cigar;
 use crate::components::WavefrontComponents;
 use crate::offset::{OFFSET_NULL, wavefront_h, wavefront_v};
 use crate::penalties::{DistanceMetric, WavefrontPenalties};
+use crate::sequences::{SequenceMode, WavefrontSequences};
 use crate::slab::WavefrontSlab;
 
 // Backtrace type constants (packed into low 4 bits of i64).
@@ -627,6 +628,229 @@ fn backtrace_affine_c<const N: usize>(
             "I?/D?-beginning backtrace error (v={v}, h={h}, score={score})"
         );
     }
+
+    // Adjust to point to first valid operation
+    cigar.begin_offset += 1;
+    cigar.score = alignment_score;
+}
+
+// --- Singletrack backtrace (M-wavefronts only) ---
+
+/// Offset of M-wavefront cell (`score`, `k`) for the Singletrack backtrace
+/// (C's `wavefront_backtrace_m_offset`): `None` if the score is out of range,
+/// the wavefront is null, `k` is outside its initialized range (not `[lo,
+/// hi]`: heuristics trim that, but later computations can still read the
+/// cells they cut), or the offset is null.
+#[inline(always)]
+fn st_m_offset<const N: usize>(
+    wf_components: &WavefrontComponents<N>,
+    score: i32,
+    k: i32,
+) -> Option<i32> {
+    if score < 0 || !wf_components.has_slot(score as usize) {
+        return None;
+    }
+    let m_ptr = wf_components.get_m_ptr(score as usize);
+    if m_ptr.is_null() {
+        return None;
+    }
+    let wf = unsafe { &*m_ptr };
+    if k < wf.wf_elements_init_min || wf.wf_elements_init_max < k {
+        return None;
+    }
+    let offset = wf.get_offset(k);
+    (offset != OFFSET_NULL).then_some(offset)
+}
+
+/// Number of consecutive matches ending at cell (`v`, `h`), walking back
+/// along the diagonal, at most `min(v, h)` (C's
+/// `wavefront_backtrace_singletrack_count_backward_matches`).
+fn st_backward_matches(sequences: &WavefrontSequences, v: i32, h: i32) -> i32 {
+    let max_matches = v.min(h);
+    if sequences.mode == SequenceMode::Lambda {
+        let mut n = 0;
+        while n < max_matches && sequences.cmp_lambda(v - n - 1, h - n - 1) {
+            n += 1;
+        }
+        return n;
+    }
+    let pattern = &sequences.pattern_ptr()[..v as usize];
+    let text = &sequences.text_ptr()[..h as usize];
+    pattern
+        .iter()
+        .rev()
+        .zip(text.iter().rev())
+        .take(max_matches as usize)
+        .take_while(|(p, t)| p == t)
+        .count() as i32
+}
+
+/// Write `n` copies of `op` into the CIGAR (backwards).
+#[inline(always)]
+fn write_ops(cigar: &mut Cigar, op: u8, n: i32) {
+    if n <= 0 {
+        return;
+    }
+    let n = n as usize;
+    let start = cigar.begin_offset + 1 - n;
+    cigar.operations[start..cigar.begin_offset + 1].fill(op);
+    cigar.begin_offset = start - 1;
+}
+
+/// Look for an M cell at `gap_score` from which an insertion (diagonal
+/// `k - l`) or else a deletion (`k + l`) of length `l`, then matches,
+/// reaches an offset in `[offset_orig, offset]` (C's
+/// `wavefront_backtrace_singletrack_gap`). On success, prepend the matches
+/// and the gap and move (`k`, `offset`) to that cell.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn st_gap<const N: usize>(
+    wf_components: &WavefrontComponents<N>,
+    cigar: &mut Cigar,
+    gap_score: i32,
+    l: i32,
+    offset_orig: i32,
+    k: &mut i32,
+    offset: &mut i32,
+) -> bool {
+    if let Some(m) = st_m_offset(wf_components, gap_score, *k - l)
+        && m + l >= offset_orig
+        && m + l <= *offset
+    {
+        write_ops(cigar, b'M', *offset - (m + l));
+        write_ops(cigar, b'I', l);
+        *k -= l;
+        *offset = m;
+        return true;
+    }
+    if let Some(m) = st_m_offset(wf_components, gap_score, *k + l)
+        && m >= offset_orig
+        && m <= *offset
+    {
+        write_ops(cigar, b'M', *offset - m);
+        write_ops(cigar, b'D', l);
+        *k += l;
+        *offset = m;
+        return true;
+    }
+    false
+}
+
+/// Singletrack backtrace (C's `wavefront_backtrace_affine_singletrack`, C
+/// a823d54): the gap-affine/affine2p CIGAR from the M wavefronts alone. From
+/// an M cell, take the longest run of backward matches; if a mismatch from
+/// M at `score - x` explains it, continue there. Otherwise the cell ends a
+/// gap: try gaps of increasing length `l` (insertion, then deletion; piece 1
+/// before piece 2) opening from an M cell at `score - o - l·e`. It resolves
+/// ties differently from [`backtrace_affine`], with the same score.
+///
+/// `pattern_begin_free`/`text_begin_free` are the begin-free limits (0 for
+/// end-to-end), for the start check (C aborts if the trace cannot reach a
+/// valid start; that only happens on a bug).
+#[allow(clippy::too_many_arguments)]
+pub fn backtrace_affine_singletrack<const N: usize>(
+    wf_components: &WavefrontComponents<N>,
+    sequences: &WavefrontSequences,
+    penalties: &WavefrontPenalties,
+    pattern_begin_free: i32,
+    text_begin_free: i32,
+    alignment_score: i32,
+    alignment_k: i32,
+    alignment_offset: i32,
+    component_end: ComponentType,
+    cigar: &mut Cigar,
+) {
+    let (pattern_length, text_length) = (sequences.pattern_length, sequences.text_length);
+    let two_piece = penalties.distance_metric == DistanceMetric::GapAffine2p;
+
+    // Prepare cigar — write backwards from the end of the buffer
+    let max_ops = cigar.operations.len();
+    cigar.end_offset = max_ops;
+    cigar.begin_offset = max_ops - 1;
+
+    let mut score = alignment_score;
+    let mut k = alignment_k;
+    let mut offset = alignment_offset;
+    let mut offset_orig = offset;
+
+    // Account for ending insertions/deletions (ends-free)
+    if component_end == ComponentType::M {
+        let (v, h) = (wavefront_v(k, offset), wavefront_h(k, offset));
+        write_ops(cigar, b'D', pattern_length - v);
+        write_ops(cigar, b'I', text_length - h);
+    }
+
+    let mut in_mmatrix = component_end == ComponentType::M;
+    let mut l = 0; // Length of the gap being searched for
+    while score != 0 {
+        if in_mmatrix {
+            let (v, h) = (wavefront_v(k, offset), wavefront_h(k, offset));
+            let nmatches = st_backward_matches(sequences, v, h);
+            offset_orig = offset - nmatches;
+            // A mismatch explains the cell if its source extends to it
+            let mismatch = score - penalties.mismatch;
+            if st_m_offset(wf_components, mismatch, k) == Some(offset_orig - 1) {
+                write_ops(cigar, b'M', nmatches);
+                write_ops(cigar, b'X', 1);
+                offset = offset_orig - 1;
+                score = mismatch;
+            } else {
+                // Otherwise a gap ends somewhere in [offset_orig, offset]
+                // (M keeps only the furthest offset after extension).
+                in_mmatrix = false;
+                l = 0;
+            }
+        } else {
+            l += 1;
+            let indel1 = score - penalties.gap_opening1 - l * penalties.gap_extension1;
+            let indel2 = if two_piece {
+                score - penalties.gap_opening2 - l * penalties.gap_extension2
+            } else {
+                -1
+            };
+            if st_gap(
+                wf_components,
+                cigar,
+                indel1,
+                l,
+                offset_orig,
+                &mut k,
+                &mut offset,
+            ) {
+                score = indel1;
+                in_mmatrix = true;
+            } else if st_gap(
+                wf_components,
+                cigar,
+                indel2,
+                l,
+                offset_orig,
+                &mut k,
+                &mut offset,
+            ) {
+                score = indel2;
+                in_mmatrix = true;
+            } else if indel1 < 0 && indel2 < 0 {
+                // No source: only valid at an ends-free start (first row/column)
+                in_mmatrix = wavefront_v(k, offset_orig) == 0 || wavefront_h(k, offset_orig) == 0;
+                break;
+            }
+        }
+    }
+
+    // Account for the leading matches and gaps
+    let (mut v, mut h) = (wavefront_v(k, offset), wavefront_h(k, offset));
+    let num_matches = v.min(h);
+    v -= num_matches;
+    h -= num_matches;
+    // C aborts here ("Singletrack backtrace error").
+    debug_assert!(
+        in_mmatrix && v <= pattern_begin_free && h <= text_begin_free,
+        "Singletrack backtrace error (v={v}, h={h}, score={score})"
+    );
+    write_ops(cigar, b'M', num_matches);
+    write_ops(cigar, b'D', v);
+    write_ops(cigar, b'I', h);
 
     // Adjust to point to first valid operation
     cigar.begin_offset += 1;

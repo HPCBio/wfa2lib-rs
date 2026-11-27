@@ -190,8 +190,9 @@ By default output is identical to C, including results C gets wrong. With
 fixed instead. Currently this covers ends-free alignment with a match reward
 (`match < 0`), where C can return a suboptimal alignment (corrected mode
 returns the optimal one), and Z-drop, where C backtraces the partial
-alignment from the wrong score (empty or invalid CIGARs, and results that
-differ between memory modes). With `match == 0` (the default penalties), it
+alignment from the wrong score in med/low memory, for gap-linear and in
+BiWFA (empty or invalid CIGARs, and results that differ between memory
+modes). With `match == 0` (the default penalties), it
 also fixes the sign of the score X-drop and Z-drop use, which in C makes
 X-drop abandon most divergent pairs. See `Compat` in the API docs. In the
 CLI, `--no-c-compat` also makes score-only output `-1` when no alignment was

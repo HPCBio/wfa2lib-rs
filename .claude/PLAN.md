@@ -32,7 +32,7 @@ src/
                                   BT-block offloading (`med`/`low` memory modes)
   extend.rs                    -- Extend kernels (packed e2e, endsfree, custom)
   termination.rs               -- End2end and endsfree termination checks
-  backtrace.rs                 -- Linear and affine wavefront backtrace
+  backtrace.rs                 -- Linear and affine wavefront backtrace; Singletrack (M-only) affine
   heuristic.rs                 -- Heuristic strategies (banded, adaptive, xdrop, zdrop)
   aligner.rs                   -- WavefrontAligner (main state + public API),
                                   unidirectional loop and BiWFA recursion
@@ -44,6 +44,7 @@ tests/
   corrected_endsfree.rs        -- Compat::Corrected ends-free vs a DP oracle
   xdrop_steps.rs               -- X-drop steps > 1 CIGAR validity, both modes (#21)
   corrected_zdrop.rs           -- Compat::Corrected Z-drop ends (#22)
+  singletrack.rs               -- Singletrack backtrace: valid, same score as classic, lambda
   test_vs_reference.rs         -- library vs C reference outputs
   wfa_utest.sh                 -- stock C unit tests on the Rust CLI
   data/                        -- CLI test fixtures

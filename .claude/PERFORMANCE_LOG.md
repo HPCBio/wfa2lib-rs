@@ -641,3 +641,28 @@ utest/long global affine controls 1.00 / 0.99. Byte-identical to `main` over
 fixture and 7,980 real pairs per dataset at six limits give identical scores,
 tables and error models; linear ends-free at the full bound goes from 3.0× to
 1.5–1.6× its t = 0 cost (PacBio 5.43 → 2.74 s, MiSeq 0.454 → 0.262 s).
+
+## 2026-11-27: Singletrack backtrace (C a823d54, HPCBio/wfa2lib-rs#31)
+
+C's Singletrack backtrace (Marco-Sola-Lab/WFA2-lib#150) replaces the
+classic high-memory gap-affine/affine2p backtrace. Ported for output parity
+only: the backtrace reads just the M wavefronts. C also recycles the I/D
+wavefront at `score - 2·e` (I/D span every reachable diagonal so it always
+fits), which is where its memory saving comes from; not ported yet.
+
+M2, load ~4, `/usr/bin/time -l`, min of 3, high memory, CIGAR output.
+`main` (`04b1cde`, classic) vs this branch (Singletrack); C `add8f26`
+(classic) vs `8702abe` (Singletrack + recycling):
+
+| data | penalties | Rust instr classic → ST | Rust RSS | C instr classic → ST | C RSS classic → ST |
+|---|---|---|---|---|---|
+| long 2 kb | affine | 2.15G → 2.15G | 17.5 MB | 2.37G → 2.35G | 11.9 → 5.9 MB |
+| long 2 kb | affine2p | 8.43G → 8.44G | 62.0 MB | 10.11G → 9.86G | 50.0 → 21.4 MB |
+| long 2 kb | affine -3,5,3,2 | 5.57G → 5.57G | 52.6 MB | 5.96G → 5.86G | 38.8 → 17.1 MB |
+| utest | affine | 5.58G → 5.59G | 275 MB | 5.89G → 5.75G | 273 → 98 MB |
+| utest | affine2p | 24.69G → 24.85G | 1778 → 1790 MB | 28.98G → 27.96G | 1754 → 364 MB |
+| utest | affine -3,5,3,2 | 13.58G → 13.47G | 872 MB | 13.73G → 13.29G | 814 → 285 MB |
+
+The backtrace itself is cost-neutral (±0.7% instructions). Rust's
+high-memory gap-affine RSS is now 2.8–4.9× C's: porting the I/D recycling
+is the follow-up.

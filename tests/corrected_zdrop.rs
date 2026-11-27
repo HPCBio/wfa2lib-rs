@@ -1,8 +1,10 @@
-//! `Compat::Corrected` Z-drop ends (HPCBio/wfa2lib-rs#22): C backtraces the
+//! `Compat::Corrected` Z-drop ends (HPCBio/wfa2lib-rs#22): C backtraced the
 //! best cell at the current score, where it needn't exist (high mode: empty
-//! or unchecked CIGARs; med/low: a dead cell). Corrected mode backtraces it
-//! at the score it was found at, so every memory mode gives a valid partial
-//! alignment with the same score.
+//! or unchecked CIGARs; med/low: a dead cell). Since C dcfc9ed, C's
+//! high-memory gap-affine backtrace starts at the score the cell was found
+//! at; med/low (and gap-linear, and BiWFA's end component) still don't.
+//! Corrected mode backtraces it at that score in every mode, so every memory
+//! mode gives a valid partial alignment with the same score.
 
 use wfa2lib_rs::aligner::{AlignmentScope, Compat, MemoryMode, WavefrontAligner};
 use wfa2lib_rs::cigar::Cigar;
@@ -71,12 +73,14 @@ fn valid_prefix(cigar: &Cigar, pat: &[u8], txt: &[u8]) -> bool {
     i <= pat.len() && j <= txt.len()
 }
 
+/// C mode follows C: before dcfc9ed its high-memory CIGAR here was the
+/// invalid `2I58M`; C 8702abe gives this valid one.
 #[test]
-fn issue_22_c_mode_high_is_invalid() {
+fn issue_22_c_mode_high_follows_c() {
     let (pat, txt) = pair();
     let cigar = run(Compat::C, MemoryMode::High);
-    assert_eq!(cigar.to_string_rle(true), "2I58M");
-    assert!(!valid_prefix(&cigar, &pat, &txt));
+    assert_eq!(cigar.to_string_rle(true), "13M1X5M1I36M1I3M");
+    assert!(valid_prefix(&cigar, &pat, &txt));
 }
 
 #[test]

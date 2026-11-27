@@ -527,6 +527,10 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   default and `-3,5,3,2` × {`wfa.utest.seq`, `long.seq`}: no invalid
   CIGARs (C: up to 64), and with default penalties far fewer empty results
   (`long.seq` `50,10`: 0, C: 300).
+- **Upstream (2026-11-27):** C dcfc9ed (Marco-Sola-Lab/WFA2-lib#150) starts
+  the high-memory gap-affine/affine2p backtrace at the best cell's score,
+  unidirectional and BiWFA's base (still in its end component); ported to C
+  mode with C 8702abe. Gap-linear follows in C bbfe1ed; med/low remain.
 - **Tests:** `tests/corrected_zdrop.rs` (`long.seq` pair 1,
   `tests/data/issue22_zdrop.seq`; a generated pair whose Z-drop comes after
   two compaction probes, which fails without the pin; BiWFA on `long.seq`
