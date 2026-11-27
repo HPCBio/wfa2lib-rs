@@ -60,6 +60,14 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   `WavefrontSlab::reap_cigar` (busy list, recorded only while the slab is
   large): after long alignments, short ones in high memory were up to 3.5×
   slower than needed (PERFORMANCE_LOG 2026-10-17).
+- [x] 6fb3fa6 (Marco-Sola-Lab/WFA2-lib#151): high-memory indel wavefront
+  array sized for the indel bound |P|+|T|. Rust had the same sizing; its
+  bounds check made the alignment fail instead of overflowing (FIXED_BUGS 17).
+- [x] c09ee80 (Marco-Sola-Lab/WFA2-lib#151): BiWFA score with an empty
+  sequence. Rust returned 0 and never set `cigar().score` (FIXED_BUGS 18).
+- [ ] Rest of 8a302a4 (Marco-Sola-Lab/WFA2-lib#146, #150 Singletrack, #151
+  heuristics): assessed 2026-11-27, to be ported in steps (#21 pin, #151
+  heuristics in C mode, BiWFA rejects X/Z-drop, Singletrack).
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and
   C++-binding commits.
 
@@ -226,3 +234,7 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   which corrected mode now trims exactly (gap-linear always; affine/affine2p
   up to a begin-free limit of 4). Linear ends-free 0.47–0.95× on dada2-like
   pairs; dada2-rs real data identical and its full-bound linear cost halved.
+- **2026-11-27:** assessed upstream C 6176f94..8a302a4 with the differential
+  suite at three commits (add8f26, 8702abe, 8a302a4). Fixed two Rust bugs
+  found on the way: indel high-memory sizing (6fb3fa6) and BiWFA scores
+  (c09ee80). Output vs the pinned C unchanged.
