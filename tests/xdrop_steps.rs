@@ -1,9 +1,7 @@
 //! X-drop with `steps_between_cutoffs > 1` (HPCBio/wfa2lib-rs#21): the
 //! backtrace read wavefronts the cutoff trimmed to empty, giving invalid
 //! CIGARs. C fixed it in 0285b52 (Marco-Sola-Lab/WFA2-lib#146); both compat
-//! modes are valid and agree. The penalties have a match reward: with
-//! `match == 0`, corrected mode also changes X-drop's scoring
-//! (HPCBio/wfa2lib-rs#55), so the modes would differ.
+//! modes are valid and agree.
 
 use wfa2lib_rs::aligner::{AlignmentScope, Compat, WavefrontAligner};
 use wfa2lib_rs::cigar::Cigar;

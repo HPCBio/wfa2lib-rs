@@ -1,17 +1,17 @@
 //! `Compat::Corrected` Z-drop ends (HPCBio/wfa2lib-rs#22): C backtraced the
 //! best cell at the current score, where it needn't exist (high mode: empty
-//! or unchecked CIGARs; med/low: a dead cell). Since C dcfc9ed, C's
-//! high-memory gap-affine backtrace starts at the score the cell was found
-//! at; med/low (and gap-linear, and BiWFA's end component) still don't.
-//! Corrected mode backtraces it at that score in every mode, so every memory
-//! mode gives a valid partial alignment with the same score.
+//! or unchecked CIGARs; med/low: a dead cell). Since C dcfc9ed/bbfe1ed, C's
+//! high-memory backtrace starts at the score the cell was found at; med/low
+//! still don't. Corrected mode backtraces it at that score in every mode, so
+//! every memory mode gives a valid partial alignment with the same score.
 
 use wfa2lib_rs::aligner::{AlignmentScope, Compat, MemoryMode, WavefrontAligner};
 use wfa2lib_rs::cigar::Cigar;
 use wfa2lib_rs::heuristic::HeuristicStrategy;
 use wfa2lib_rs::penalties::{AffinePenalties, WavefrontPenalties};
 
-/// `long.seq` pair 1 (tests/differential/data), 2 kb, 8% error.
+/// `long.seq` pair 134 (tests/differential/data). Pair 1, used before C
+/// 064755b, no longer Z-drops early enough to show the bug.
 fn pair() -> (Vec<u8>, Vec<u8>) {
     let data = std::fs::read_to_string("tests/data/issue22_zdrop.seq").unwrap();
     let mut lines = data.lines();
@@ -37,14 +37,14 @@ const PEN: AffinePenalties = AffinePenalties {
     gap_extension: 2,
 };
 
-/// Align with Z-drop `100,5`; returns the CIGAR.
+/// Align with Z-drop `50,10`; returns the CIGAR.
 fn run(compat: Compat, memory: MemoryMode) -> Cigar {
     let (pat, txt) = pair();
     let mut a = WavefrontAligner::<3>::new(WavefrontPenalties::new_affine(PEN));
     a.set_alignment_scope(AlignmentScope::ComputeAlignment);
     a.set_heuristic(HeuristicStrategy::ZDrop {
-        zdrop: 100,
-        steps_between_cutoffs: 5,
+        zdrop: 50,
+        steps_between_cutoffs: 10,
     });
     a.set_memory_mode(memory);
     a.set_compat(compat);
@@ -73,14 +73,19 @@ fn valid_prefix(cigar: &Cigar, pat: &[u8], txt: &[u8]) -> bool {
     i <= pat.len() && j <= txt.len()
 }
 
-/// C mode follows C: before dcfc9ed its high-memory CIGAR here was the
-/// invalid `2I58M`; C 8702abe gives this valid one.
+/// C mode follows C (8a302a4's driver): high memory scores 4498, and med/low
+/// read the dead cell and score 4502 (in a fresh C process; C's result
+/// depends on earlier alignments).
 #[test]
-fn issue_22_c_mode_high_follows_c() {
+fn issue_22_c_mode_follows_c() {
     let (pat, txt) = pair();
-    let cigar = run(Compat::C, MemoryMode::High);
-    assert_eq!(cigar.to_string_rle(true), "13M1X5M1I36M1I3M");
-    assert!(valid_prefix(&cigar, &pat, &txt));
+    let high = run(Compat::C, MemoryMode::High);
+    assert!(valid_prefix(&high, &pat, &txt));
+    assert_eq!(high.score_gap_affine(&PEN), 4498);
+    for memory in [MemoryMode::Med, MemoryMode::Low] {
+        let cigar = run(Compat::C, memory);
+        assert_eq!(cigar.score_gap_affine(&PEN), 4502, "{memory:?}");
+    }
 }
 
 #[test]
@@ -164,9 +169,9 @@ fn issue_22_corrected_survives_compaction() {
 }
 
 /// BiWFA: a base sub-alignment that Z-drops is backtraced like the
-/// unidirectional end, in M from the best cell's score (C: the current
-/// score, in the sub-problem's end component). `long.seq` pair 21 with Z-drop
-/// `50,10`: invalid in C, valid in corrected mode.
+/// unidirectional end, in M from the best cell's score (C mode: in the
+/// sub-problem's end component). `long.seq` pair 21 with Z-drop `50,10`:
+/// valid in corrected mode. C rejects Z-drop with BiWFA since 7110ee3.
 #[test]
 fn issue_22_biwfa() {
     let data = std::fs::read_to_string("tests/data/issue22_zdrop_biwfa.seq").unwrap();
@@ -184,7 +189,6 @@ fn issue_22_biwfa() {
         a.align_biwfa(pat, txt);
         a.cigar().clone()
     };
-    assert!(!valid_prefix(&align(Compat::C), pat, txt));
     let cigar = align(Compat::Corrected);
     assert!(!cigar.operations_slice().is_empty());
     assert!(valid_prefix(&cigar, pat, txt));

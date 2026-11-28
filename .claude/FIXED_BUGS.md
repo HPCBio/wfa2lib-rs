@@ -530,9 +530,13 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
 - **Upstream (2026-11-27):** C dcfc9ed (Marco-Sola-Lab/WFA2-lib#150) starts
   the high-memory gap-affine/affine2p backtrace at the best cell's score,
   unidirectional and BiWFA's base (still in its end component); ported to C
-  mode with C 8702abe. Gap-linear follows in C bbfe1ed; med/low remain.
-- **Tests:** `tests/corrected_zdrop.rs` (`long.seq` pair 1,
-  `tests/data/issue22_zdrop.seq`; a generated pair whose Z-drop comes after
+  mode with C 8702abe. Gap-linear followed in C bbfe1ed (ported with C
+  8a302a4, also in BiWFA's base); med/low remain. C also rejects Z-drop
+  with BiWFA since 7110ee3, and its Z-drop persistence rule (064755b) makes
+  the bug rarer: 3 of the 20 known differential cases remain.
+- **Tests:** `tests/corrected_zdrop.rs` (`long.seq` pair 134 with Z-drop
+  `50,10`, `tests/data/issue22_zdrop.seq` (pair 1 with `100,5` until C
+  064755b); a generated pair whose Z-drop comes after
   two compaction probes, which fails without the pin; BiWFA on `long.seq`
   pair 21, `tests/data/issue22_zdrop_biwfa.seq`).
 
@@ -556,6 +560,11 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   `50,1`); Z-drop gives real partial alignments (e.g. `50,10` on
   `long.seq`: the full optimal alignment), high = med.
 - **Tests:** `test_compute_sw_scores_c_formula` (both stand-ins).
+- **Upstream (2026-11-28):** fixed in C 1b36cc1
+  (Marco-Sola-Lab/WFA2-lib#151), which also leaves free leading gaps
+  (ends-free, `match == 0`) out of the score. Ported to both modes with C
+  8a302a4; `Compat::Corrected` no longer changes it (`heuristic::DropParams`
+  replaces `swg_match`).
 
 ### 14g. Corrected mode didn't reach BiWFA's sub-aligners (Rust bug)
 
@@ -686,3 +695,20 @@ known C bugs; the default `Compat::C` stays output-identical to C. It covers:
   linear, affine, affine2p; match 0 and < 0; BiWFA equals `align_end2end`;
   fails without the fix).
 
+## 19. `cigar().score` after maxtrim held a classic score (Rust quirk)
+
+- **Symptom:** after a Z-dropped or extension alignment was max-trimmed,
+  `cigar().score` held maxtrim's classic score (matches +1 when
+  `match == 0`, penalties negative), while every other alignment stores the
+  WFA score (penalties positive). The CLI scores CIGARs itself, so its
+  output was right.
+- **Root cause:** `Cigar::maxtrim_*` set `score` the way C's do (C's
+  `cigar->score` is a classic score); the aligner kept it.
+- **Fix:** `WavefrontAligner::maxtrim_cigar` rescores the kept part in WFA
+  units (`cigar_wfa_score`, free leading gap excluded), alongside the port
+  of C 97d7903 (the free leading gap isn't charged by the trim). With
+  heuristics, gap-affine/affine2p alignments (and BiWFA of every metric)
+  now report their CIGAR's score, as C f4e0d0d/5713de8.
+- **Tests:** `tests/heuristic_scores.rs` (random pairs; a high-memory X-drop
+  CIGAR that merges two gaps, WFA score 228 vs CIGAR 222),
+  `aligner::tests::test_maxtrim_skips_free_leading_gap`.

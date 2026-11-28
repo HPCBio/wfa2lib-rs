@@ -183,18 +183,16 @@ Input files use the WFA2-lib format: each pair is two lines, `>pattern` then
 as each pair is aligned. Like the C tool, it also supports `--wfa-span`
 (`global`, `extension`, `ends-free,P0,Pf,T0,Tf`) and `--wfa-heuristic` with
 `--wfa-heuristic-parameters` (`banded-static`, `banded-adaptive`,
-`wfa-adaptive`, `xdrop`, `zdrop`).
+`wfa-adaptive`, `xdrop`, `zdrop`). As C, it rejects `xdrop` and `zdrop`
+with BiWFA (`--wfa-memory=ultralow`).
 
 By default output is identical to C, including results C gets wrong. With
 `--no-c-compat` (library: `set_compat(Compat::Corrected)`), known C bugs are
 fixed instead. Currently this covers ends-free alignment with a match reward
 (`match < 0`), where C can return a suboptimal alignment (corrected mode
 returns the optimal one), and Z-drop, where C backtraces the partial
-alignment from the wrong score in med/low memory, for gap-linear and in
-BiWFA (empty or invalid CIGARs, and results that differ between memory
-modes). With `match == 0` (the default penalties), it
-also fixes the sign of the score X-drop and Z-drop use, which in C makes
-X-drop abandon most divergent pairs. See `Compat` in the API docs. In the
+alignment from the wrong score in med/low memory and in BiWFA (results that
+differ between memory modes). See `Compat` in the API docs. In the
 CLI, `--no-c-compat` also makes score-only output `-1` when no alignment was
 found, as CIGAR output does (C prints the score where the search gave up, a
 value from a signed overflow, or `INT32_MIN` for BiWFA).
