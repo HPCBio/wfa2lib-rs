@@ -37,14 +37,6 @@ compare() {
         echo "  SKIP $name (no reference file)"
         return
     fi
-    # C 8702abe (Singletrack) did not regenerate this fixture, so C fails it
-    # too; C 98e208d (Marco-Sola-Lab/WFA2-lib#151) regenerates it.
-    if [ "$name" = "test.affine.xdrop" ] &&
-       [ "$(cat "$PROJECT_DIR/tests/differential/C_COMMIT")" = "8702abe" ]; then
-        echo "  SKIP $name (C's fixture is stale at 8702abe)"
-        return
-    fi
-
     if diff -q "$output" "$reference" > /dev/null 2>&1; then
         echo "  OK   $name"
         PASS=$((PASS + 1))
@@ -80,7 +72,7 @@ run_test() {
     compare "$outfile" "$reffile" "${name}.${suffix}"
 }
 
-# Run all 13 combos for a given mode
+# Run all 13 combos for a given mode (12 for BiWFA)
 run_mode() {
     local mode_flags="$1"
     local name="$2"
@@ -103,7 +95,9 @@ run_mode() {
     # Heuristics
     run_test "$mode_flags" "$name" "gap-affine-wfa" "affine.wfapt0" "--wfa-heuristic=wfa-adaptive --wfa-heuristic-parameters=10,50,1"
     run_test "$mode_flags" "$name" "gap-affine-wfa" "affine.wfapt1" "--wfa-heuristic=wfa-adaptive --wfa-heuristic-parameters=10,50,10"
-    run_test "$mode_flags" "$name" "gap-affine-wfa" "affine.xdrop" "--affine-penalties=-2,3,1,4 --wfa-heuristic=xdrop --wfa-heuristic-parameters=20,2"
+    if [[ $name != test.biwfa* ]]; then # BiWFA rejects X-drop (C 7110ee3)
+        run_test "$mode_flags" "$name" "gap-affine-wfa" "affine.xdrop" "--affine-penalties=-2,3,1,4 --wfa-heuristic=xdrop --wfa-heuristic-parameters=20,2"
+    fi
 }
 
 # Run all 5 modes

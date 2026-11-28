@@ -45,6 +45,7 @@ tests/
   xdrop_steps.rs               -- X-drop steps > 1 CIGAR validity, both modes (#21)
   corrected_zdrop.rs           -- Compat::Corrected Z-drop ends (#22)
   singletrack.rs               -- Singletrack backtrace: valid, same score as classic, lambda
+  heuristic_scores.rs          -- heuristic alignments report their CIGAR's score (C f4e0d0d)
   test_vs_reference.rs         -- library vs C reference outputs
   wfa_utest.sh                 -- stock C unit tests on the Rust CLI
   data/                        -- CLI test fixtures

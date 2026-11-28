@@ -72,22 +72,15 @@ pub enum MemoryMode {
 ///   lengths gives its real score. Also applies to extension alignment.
 ///   It can take more steps than C (up to the optimal score).
 ///
-/// - **Z-drop ends** (HPCBio/wfa2lib-rs#22): C backtraces the partial
-///   alignment from the best cell's diagonal and offset but at the current
-///   score, where that cell needn't exist, in med/low memory, for
-///   gap-linear, and in BiWFA's end component (high-memory gap-affine/affine2p
-///   start at the right score since C dcfc9ed). Med/low read a dead cell
-///   whose backtrace C never initialized, so C's result depends on earlier
-///   alignments; gap-linear finds no source and returns an empty CIGAR or
-///   one with unchecked matches. Corrected mode backtraces the best cell at
-///   the score it was found at, keeping its backtrace for med/low, so all
-///   memory modes give a valid partial alignment with the same score.
-///
-/// - **X-drop and Z-drop with `match == 0`** (HPCBio/wfa2lib-rs#55): their
-///   Smith-Waterman score needs a stand-in match score, and C's is -1, so
-///   progress lowers the score: X-drop prunes the diagonals that progress
-///   most (abandoning most divergent pairs), and Z-drop's best cell is the
-///   start. Corrected mode uses +1, as C did before its commit 51fb1aa.
+/// - **Z-drop ends** (HPCBio/wfa2lib-rs#22): in med/low memory and in
+///   BiWFA's end component, C backtraces the partial alignment from the best
+///   cell's diagonal and offset but at the current score, where that cell
+///   needn't exist (high memory starts at the right score since C
+///   dcfc9ed/bbfe1ed). Med/low read a dead cell whose backtrace C never
+///   initialized, so C's result depends on earlier alignments. Corrected
+///   mode backtraces the best cell at the score it was found at, keeping its
+///   backtrace for med/low, so all memory modes give a valid partial
+///   alignment with the same score.
 ///
 /// Otherwise, gap-linear/affine/affine2p with `match == 0` give identical
 /// results in both modes.
@@ -678,14 +671,15 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.prev_score_count = (score + 1) as usize;
 
         // Finalize
+        let mut result = score;
         if self.status == AlignStatus::EndReached {
             // Backtrace to produce CIGAR if requested
             if self.alignment_scope == AlignmentScope::ComputeAlignment {
-                self.backtrace_from(
-                    score,
-                    self.alignment_end_pos.k,
-                    self.alignment_end_pos.offset,
-                );
+                let WavefrontPos { k, offset, .. } = self.alignment_end_pos;
+                self.backtrace_from(score, k, offset);
+                self.cigar.end_v = wavefront_v(k, offset);
+                self.cigar.end_h = wavefront_h(k, offset);
+                result = self.rescore_heuristic_cigar(score);
             }
             self.status = AlignStatus::Completed;
         } else if self.status == AlignStatus::EndUnreachable
@@ -700,7 +694,7 @@ impl<const N: usize> WavefrontAligner<N> {
             self.status = AlignStatus::Partial;
         }
 
-        score
+        result
     }
 
     /// Align two sequences with ends-free (semi-global) alignment.
@@ -814,6 +808,14 @@ impl<const N: usize> WavefrontAligner<N> {
                         AlignStatus::Completed
                     };
                 } else {
+                    let WavefrontPos { k, offset, .. } = self.alignment_end_pos;
+                    self.cigar.end_v = wavefront_v(k, offset);
+                    self.cigar.end_h = wavefront_h(k, offset);
+                    // Corrected mode's candidate score includes the free end
+                    // gaps; keep it.
+                    if candidate.is_none() {
+                        result = self.rescore_heuristic_cigar(score);
+                    }
                     self.status = AlignStatus::Completed;
                 }
             } else {
@@ -1370,22 +1372,28 @@ impl<const N: usize> WavefrontAligner<N> {
             )
     }
 
-    /// Backtrace a Z-drop end, the best cell in `alignment_end_pos`, at the
-    /// current `score`, as C does for gap-linear and med/low. The cell was
-    /// found at an earlier score and needn't exist at `score`: high mode then
-    /// finds no source (an empty CIGAR, or unchecked matches), and med/low
-    /// read a dead cell (HPCBio/wfa2lib-rs#22). Since C dcfc9ed, C's high-memory
-    /// gap-affine/affine2p backtrace starts at the score the cell was found
-    /// at. Corrected mode always does, from the wavefronts (high) or from its
-    /// backtrace kept then (med/low).
+    /// X-drop/Z-drop scoring parameters for this alignment.
+    fn drop_params(&self) -> heuristic::DropParams {
+        let endsfree = self.alignment_span == AlignmentSpan::EndsFree;
+        heuristic::DropParams::new(
+            self.penalties.match_,
+            endsfree,
+            self.pattern_begin_free,
+            self.text_begin_free,
+            self.wf_components.max_score_scope as i32,
+        )
+    }
+
+    /// Backtrace a Z-drop end, the best cell in `alignment_end_pos`. The cell
+    /// was found at an earlier score; since C dcfc9ed/bbfe1ed, C's high-memory
+    /// backtrace starts at that score. C's med/low backtrace reads the cell at
+    /// the current `score`, where it needn't exist: a dead cell
+    /// (HPCBio/wfa2lib-rs#22). Corrected mode backtraces from the backtrace
+    /// kept when the cell was found (med/low).
     fn backtrace_zdrop_end(&mut self, score: i32) {
         let WavefrontPos { score: best_score, k, offset } = self.alignment_end_pos;
         if self.compat == Compat::C {
-            let affine = matches!(
-                self.penalties.distance_metric,
-                DistanceMetric::GapAffine | DistanceMetric::GapAffine2p
-            );
-            let from = if affine && !self.wf_components.bt_piggyback && best_score >= 0 {
+            let from = if !self.wf_components.bt_piggyback && best_score >= 0 {
                 best_score
             } else {
                 score
@@ -1528,10 +1536,29 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
-    /// Apply maxtrim to the CIGAR based on the distance metric.
-    /// Returns true if the CIGAR was trimmed.
+    /// Trim the CIGAR to its maximal-scoring prefix (C's
+    /// `wavefront_aligner_maxtrim_cigar`). A free leading gap (ends-free)
+    /// isn't charged: the part after it is trimmed, then it is put back
+    /// (C 97d7903). An empty CIGAR, or one trimmed to nothing, is cleared.
+    /// The CIGAR's score is then the WFA score of the kept part, free
+    /// leading gap excluded. Returns true if the CIGAR was trimmed.
     fn maxtrim_cigar(&mut self) -> bool {
-        match self.penalties.distance_metric {
+        let metric = self.penalties.distance_metric;
+        if matches!(metric, DistanceMetric::Edit | DistanceMetric::Indel) {
+            return false; // Edit/indel don't support maxtrim
+        }
+        let (mut begin_v, mut begin_h) = (0, 0);
+        if self.alignment_span == AlignmentSpan::EndsFree {
+            begin_h = self.cigar_skip_gap(b'I', self.text_begin_free);
+            if begin_h == 0 {
+                begin_v = self.cigar_skip_gap(b'D', self.pattern_begin_free);
+            }
+        }
+        if self.cigar.begin_offset >= self.cigar.end_offset {
+            self.cigar.clear(); // As C, whose trim clears an empty CIGAR
+            return true;
+        }
+        let trimmed = match metric {
             DistanceMetric::GapLinear => {
                 let p = self.penalties.linear_penalties.as_ref().unwrap();
                 self.cigar.maxtrim_gap_linear(p)
@@ -1540,12 +1567,76 @@ impl<const N: usize> WavefrontAligner<N> {
                 let p = self.penalties.affine_penalties.as_ref().unwrap();
                 self.cigar.maxtrim_gap_affine(p)
             }
-            DistanceMetric::GapAffine2p => {
+            _ => {
                 let p = self.penalties.affine2p_penalties.as_ref().unwrap();
                 self.cigar.maxtrim_gap_affine2p(p)
             }
-            _ => false, // Edit/indel don't support maxtrim
+        };
+        if self.cigar.score != i32::MIN {
+            let (v, h) = (self.cigar.end_v, self.cigar.end_h);
+            self.cigar.score = self.cigar_wfa_score(&self.cigar, v, h);
+            self.cigar.begin_offset -= (begin_v + begin_h) as usize;
+            self.cigar.end_v += begin_v;
+            self.cigar.end_h += begin_h;
         }
+        trimmed
+    }
+
+    /// Skip up to `max_length` leading `op`s of the CIGAR (C's
+    /// `wavefront_aligner_cigar_skip_gap`); returns how many.
+    fn cigar_skip_gap(&mut self, op: u8, max_length: i32) -> i32 {
+        let mut length = 0;
+        let c = &mut self.cigar;
+        while length < max_length
+            && c.begin_offset < c.end_offset
+            && c.operations[c.begin_offset] == op
+        {
+            c.begin_offset += 1;
+            length += 1;
+        }
+        length
+    }
+
+    /// With heuristics, pruning can leave a path that closes a gap and opens
+    /// one of the same type, which the CIGAR merges, so the CIGAR scores
+    /// better than the WFA score (C f4e0d0d): set the gap-affine/affine2p
+    /// CIGAR's score from its operations, free end gaps excluded (C's
+    /// `wavefront_aligner_cigar_endsfree_view`), and return it.
+    fn rescore_heuristic_cigar(&mut self, score: i32) -> i32 {
+        if matches!(self.heuristic, HeuristicStrategy::None)
+            || !matches!(
+                self.penalties.distance_metric,
+                DistanceMetric::GapAffine | DistanceMetric::GapAffine2p
+            )
+        {
+            return score;
+        }
+        let (begin, end) = (self.cigar.begin_offset, self.cigar.end_offset);
+        if self.alignment_span == AlignmentSpan::EndsFree {
+            let (plen, tlen) = (self.sequences.pattern_length, self.sequences.text_length);
+            let trailing = (plen - self.cigar.end_v) + (tlen - self.cigar.end_h);
+            self.cigar.end_offset = end.saturating_sub(trailing as usize);
+            let op = self.cigar.operations.get(begin).copied().unwrap_or(0);
+            let free = match op {
+                b'I' => self.text_begin_free,
+                b'D' => self.pattern_begin_free,
+                _ => 0,
+            };
+            self.cigar_skip_gap(op, free);
+        }
+        let view_begin = self.cigar.begin_offset;
+        let view = &self.cigar.operations[view_begin..self.cigar.end_offset.max(view_begin)];
+        let rescored = if view.is_empty() {
+            0
+        } else {
+            let v = view.iter().filter(|&&o| o != b'I').count() as i32;
+            let h = view.iter().filter(|&&o| o != b'D').count() as i32;
+            self.cigar_wfa_score(&self.cigar, v, h)
+        };
+        self.cigar.begin_offset = begin;
+        self.cigar.end_offset = end;
+        self.cigar.score = rescored;
+        rescored
     }
 
     /// Apply heuristic cutoff to the M-wavefront (and I/D wavefronts if affine).
@@ -1564,6 +1655,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let plen = self.sequences.pattern_length;
         let tlen = self.sequences.text_length;
 
+        let drop = self.drop_params();
         // Use the victim wavefront's offsets as scratch buffer for distances
         let distances_base_k = self.wf_components.wavefront_victim.base_k();
         let distances = self.wf_components.wavefront_victim.offsets_slice_mut();
@@ -1579,7 +1671,7 @@ impl<const N: usize> WavefrontAligner<N> {
             distances_base_k,
             plen,
             tlen,
-            heuristic::swg_match(self.penalties.match_, self.compat),
+            &drop,
             score,
         );
 
@@ -2514,7 +2606,12 @@ impl<const N: usize> WavefrontAligner<N> {
                 // An empty pattern or text is a single gap, appended without
                 // aligning, so it has no wavefront score: score its CIGAR
                 // (as C since c09ee80; C before it left INT32_MIN).
-                let score = if plen == 0 || tlen == 0 {
+                // With heuristics, the halves are aligned independently, so
+                // the CIGAR can score better than the breakpoint: score the
+                // CIGAR (C 5713de8).
+                let heuristic = !matches!(self.heuristic, HeuristicStrategy::None)
+                    && self.cigar.begin_offset < self.cigar.end_offset;
+                let score = if plen == 0 || tlen == 0 || heuristic {
                     self.cigar_wfa_score(&self.cigar, plen, tlen)
                 } else {
                     score
@@ -3082,17 +3179,12 @@ impl<const N: usize> WavefrontAligner<N> {
                 Ok(score)
             }
             AlignStatus::EndUnreachable if pos.offset != OFFSET_NULL => {
-                // C starts in `component_end`, at the best cell's score for
-                // gap-affine/affine2p (since C dcfc9ed) and at the current
-                // score for gap-linear; corrected mode at the best cell's
-                // score, in M (the cell is an M cell; HPCBio/wfa2lib-rs#22, as
-                // `backtrace_zdrop_end`).
+                // C starts in `component_end`, at the best cell's score
+                // (since C dcfc9ed/bbfe1ed); corrected mode in M (the cell is
+                // an M cell; HPCBio/wfa2lib-rs#22, as `backtrace_zdrop_end`).
+                // C rejects X-drop/Z-drop with BiWFA since 7110ee3.
                 if base.compat == Compat::C {
-                    let affine = matches!(
-                        base.penalties.distance_metric,
-                        DistanceMetric::GapAffine | DistanceMetric::GapAffine2p
-                    );
-                    let from = if affine && pos.score >= 0 { pos.score } else { score };
+                    let from = if pos.score >= 0 { pos.score } else { score };
                     base.backtrace_components(from, pos.k, pos.offset, component_begin, component_end);
                 } else {
                     base.backtrace_components(pos.score, pos.k, pos.offset, component_begin, ComponentType::M);
@@ -4214,6 +4306,40 @@ mod tests {
     }
 
     // --- Extension alignment tests ---
+
+    #[test]
+    fn test_maxtrim_skips_free_leading_gap() {
+        // C 97d7903: a partial ends-free alignment `IM` whose `I` is free
+        // keeps it (the trim charged it: -7, so the CIGAR was cleared).
+        let mut a = AffineAligner::new(WavefrontPenalties::new_affine(
+            crate::penalties::AffinePenalties {
+                match_: 0,
+                mismatch: 4,
+                gap_opening: 6,
+                gap_extension: 2,
+            },
+        ));
+        a.set_alignment_free_ends(0, 0, 1, 0);
+        a.cigar.resize(8);
+        let set = |a: &mut AffineAligner, ops: &[u8]| {
+            a.cigar.clear();
+            a.cigar.operations[..ops.len()].copy_from_slice(ops);
+            a.cigar.end_offset = ops.len();
+        };
+        set(&mut a, b"IM");
+        assert!(!a.maxtrim_cigar());
+        assert_eq!(a.cigar.operations_slice(), b"IM");
+        assert_eq!((a.cigar.end_v, a.cigar.end_h, a.cigar.score), (1, 2, 0));
+        // Only the free part is skipped; a longer gap is charged.
+        set(&mut a, b"IIM");
+        a.maxtrim_cigar();
+        assert!(a.cigar.operations_slice().is_empty());
+        // End-to-end has no free gap.
+        a.set_alignment_end_to_end();
+        set(&mut a, b"IM");
+        a.maxtrim_cigar();
+        assert!(a.cigar.operations_slice().is_empty());
+    }
 
     #[test]
     fn test_extension_basic() {

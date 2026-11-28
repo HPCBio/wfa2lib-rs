@@ -33,12 +33,12 @@ Checked with `tests/differential/run.sh` (1262 cases against the C commit in
 | Configuration | vs C |
 |---|---|
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
-| Stock `wfa.utest.sh` | 64/64 identical at C 8702abe (its `test.affine.xdrop` fixture is stale there, skipped; 65/65 at add8f26) (BiWFA match < 0 tie-breaks fixed, HPCBio/wfa2lib-rs#7) |
+| Stock `wfa.utest.sh` | 63/63 identical at C 8a302a4 (C dropped the two BiWFA X-drop lines, 7110ee3) (BiWFA match < 0 tie-breaks fixed, HPCBio/wfa2lib-rs#7) |
 | banded-static (affine, affine2p, linear) | Byte-identical to C 3282f83 (with Marco-Sola-Lab/WFA2-lib#125's band clamp) in high / med / score-only modes, including unreachable pairs |
 | banded-static (edit, indel) | Rust stops as unreachable; C never terminates (C bug, HPCBio/wfa2lib-rs#24) |
 | banded-adaptive | C's re-centred band ported (HPCBio/wfa2lib-rs#6): byte-identical to C 3282f83 in high / score-only / med / low (48/48) |
-| xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 3282f83 in high / score-only / med (556/576 matrix cells). The other 20 are Z-drop `med` with match < 0, where C reads uninitialized memory (HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#23 (HPCBio/wfa2lib-rs#21 fixed in C add8f26) |
-| BiWFA + any heuristic | Byte-identical to C 3282f83 (168/168: banded-static/adaptive, xdrop, zdrop, wfa-adaptive; CIGAR and score-only; HPCBio/wfa2lib-rs#6) |
+| xdrop / zdrop (affine, linear, affine2p; global / extension / ends-free) | Byte-identical to C 8a302a4 in high / score-only / med (573/576 matrix cells). The other 3 are Z-drop `med` with match < 0, where C reads uninitialized memory (HPCBio/wfa2lib-rs#22). Includes C bugs kept for parity: HPCBio/wfa2lib-rs#23 (HPCBio/wfa2lib-rs#21 fixed in C add8f26, HPCBio/wfa2lib-rs#55 in C 1b36cc1) |
+| BiWFA + any heuristic | Byte-identical to C 8a302a4 (banded-static/adaptive, wfa-adaptive; CIGAR and score-only; HPCBio/wfa2lib-rs#6). X-drop/Z-drop rejected by the CLI as C (7110ee3); the library still runs them |
 | `--wfa-memory=med\|low` (piggyback backtrace) | Byte-identical to C 3282f83 for all metrics (28/28 matrix cells, 50k × 1 kb), with heuristics as above (HPCBio/wfa2lib-rs#8) |
 | extension; ends-free with end gaps only | Byte-identical to C (all metrics incl. match < 0, alignment and score-only) |
 | ends-free with begin gaps (P0/T0 > 0) | Byte-identical to C, match == 0 and match < 0, alignment / score-only / med (HPCBio/wfa2lib-rs#9). Edit/indel CIGARs valid since C 6176f94 (Marco-Sola-Lab/WFA2-lib#144, HPCBio/wfa2lib-rs#18) |
@@ -78,8 +78,20 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   Z-drop ends backtraced from the score the best cell was found at (the
   high-memory half of HPCBio/wfa2lib-rs#22), unidirectional and BiWFA's base.
 - n/a 561bbb8: CIGAR buffer padding for C's 8-byte block writers.
-- [ ] Rest of 8a302a4 (Marco-Sola-Lab/WFA2-lib#151 heuristics): assessed
-  2026-11-27, to be ported next (BiWFA rejects X/Z-drop).
+- [x] 8a302a4 (Marco-Sola-Lab/WFA2-lib#151), all in C mode; pinned C
+  8702abe → 8a302a4:
+  - 1b36cc1: X-drop/Z-drop score matches +1 when `match == 0`, free leading
+    gaps excluded (HPCBio/wfa2lib-rs#55; `heuristic::DropParams`).
+  - 064755b: a Z-drop must last longer than the largest single penalty.
+  - bbfe1ed: gap-linear Z-drop ends backtraced from the best cell's score
+    (also BiWFA's base).
+  - 366ce29: score-only Z-drop reports the score the end cell was reached
+    at (CLI).
+  - 97d7903: maxtrim doesn't charge a free leading gap.
+  - f4e0d0d / 5713de8: heuristic gap-affine/affine2p alignments (BiWFA:
+    every metric) report their CIGAR's score (free end gaps excluded).
+  - 7110ee3: BiWFA rejects X-drop/Z-drop. The CLI exits with C's message;
+    the library documents it on `HeuristicStrategy::{XDrop, ZDrop}`.
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and
   C++-binding commits.
 
@@ -91,12 +103,7 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   memory, so C's output depends on earlier alignments. Rust reads such
   cells as zeroes (deterministic; matches C on fresh memory). C's high mode
   backtraced at the same wrong score (empty or invalid CIGARs); fixed in C
-  dcfc9ed for gap-affine/affine2p and ported (gap-linear: C bbfe1ed, not yet
-  pinned). **Fixed in corrected mode** (FIXED_BUGS 14e).
-- HPCBio/wfa2lib-rs#55: X-drop/Z-drop with `match == 0` use a sign-flipped
-  Smith-Waterman score (C regression from 51fb1aa): X-drop abandons most
-  divergent pairs, Z-drop's best cell is the start. **Fixed in corrected
-  mode** (FIXED_BUGS 14f).
+  dcfc9ed/bbfe1ed and ported. **Fixed in corrected mode** (FIXED_BUGS 14e).
 - HPCBio/wfa2lib-rs#23: score-only score for unreachable alignments (match < 0)
   is evaluated at C's unset end position (signed overflow); reproduced.
   **Fixed in corrected mode** in the CLI, which prints -1 for every
@@ -257,3 +264,8 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   start score in C mode. Differential suite: only the 20 known #22 diffs.
   Backtrace cost-neutral; C's I/D recycling (its memory saving) is next for
   #31.
+- **2026-11-28:** C `C_COMMIT` 8702abe → 8a302a4 (Marco-Sola-Lab/WFA2-lib#151
+  heuristics, all in C mode; HPCBio/wfa2lib-rs#55 fixed upstream, so no
+  longer a corrected-mode item). Differential suite: 3 known #22 diffs
+  (was 20; Z-drop persistence makes dead-cell reads rarer); stock utest
+  63/63. `cigar().score` after maxtrim is now a WFA score (FIXED_BUGS 19).

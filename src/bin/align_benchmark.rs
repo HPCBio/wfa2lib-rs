@@ -378,14 +378,17 @@ impl AnyAligner {
     /// (`wavefront_unialign_terminate`): `None` (meaning (|P|, |T|)) if the end
     /// was reached, else the end position -- the Z-drop cell, or the unset
     /// position (k = INT_MAX, offset = OFFSET_NULL), whose v + h wraps to 1.
-    fn unreached_end(&self) -> Option<(i32, i32)> {
+    /// Also the WFA score the Z-drop cell was reached at, if any (C 366ce29).
+    fn unreached_end(&self) -> Option<(i32, i32, Option<i32>)> {
         let (status, pos) = match self {
             AnyAligner::N1(a) => (a.status(), a.alignment_end_pos),
             AnyAligner::N3(a) => (a.status(), a.alignment_end_pos),
             AnyAligner::N5(a) => (a.status(), a.alignment_end_pos),
         };
-        matches!(status, AlignStatus::Partial | AlignStatus::EndUnreachable)
-            .then(|| (pos.offset.wrapping_sub(pos.k), pos.offset))
+        matches!(status, AlignStatus::Partial | AlignStatus::EndUnreachable).then(|| {
+            let score = (pos.score >= 0).then_some(pos.score);
+            (pos.offset.wrapping_sub(pos.k), pos.offset, score)
+        })
     }
 
     /// Whether the alignment ended without reaching the end and without a
@@ -523,15 +526,32 @@ fn main() {
         aligner.set_alignment_scope(AlignmentScope::ComputeAlignment);
     }
 
-    if let Some(ref heuristic) = cli.wfa_heuristic {
-        let strategy = parse_heuristic(heuristic, cli.wfa_heuristic_parameters.as_deref());
-        if matches!(
-            strategy,
-            HeuristicStrategy::XDrop { .. } | HeuristicStrategy::ZDrop { .. }
-        ) && matches!(
-            penalties.distance_metric,
-            DistanceMetric::Edit | DistanceMetric::Indel
-        ) {
+    // C's `wavefront_align_presets__checks`, in its order: BiWFA first.
+    let span = parse_span(cli.wfa_span.as_deref());
+    if use_biwfa && !matches!(span, Span::Global) {
+        eprintln!("[WFA] BiWFA ends-free and extension are not supported");
+        std::process::exit(1);
+    }
+    let strategy = cli
+        .wfa_heuristic
+        .as_ref()
+        .map(|h| parse_heuristic(h, cli.wfa_heuristic_parameters.as_deref()));
+    let is_drop = matches!(
+        strategy,
+        Some(HeuristicStrategy::XDrop { .. } | HeuristicStrategy::ZDrop { .. })
+    );
+    if use_biwfa && is_drop {
+        // C 7110ee3: BiWFA was never tested with drops.
+        eprintln!("[WFA] BiWFA is not compatible with X-drop/Z-drop heuristics");
+        std::process::exit(1);
+    }
+    if let Some(strategy) = strategy {
+        if is_drop
+            && matches!(
+                penalties.distance_metric,
+                DistanceMetric::Edit | DistanceMetric::Indel
+            )
+        {
             // As C's `wavefront_align_presets__checks`.
             eprintln!(
                 "[WFA] Heuristics drops are not compatible with 'edit'/'indel' distance metrics"
@@ -550,12 +570,6 @@ fn main() {
         aligner.set_max_alignment_steps(max_steps);
     }
 
-    let span = parse_span(cli.wfa_span.as_deref());
-    if use_biwfa && !matches!(span, Span::Global) {
-        // C rejects both combinations in `wavefront_align_presets__checks`.
-        eprintln!("[WFA] BiWFA ends-free and extension are not supported");
-        std::process::exit(1);
-    }
     if matches!(span, Span::Extension) {
         aligner.set_alignment_extension();
     }
@@ -615,15 +629,17 @@ fn main() {
 
         let biwfa_score_failed =
             use_biwfa && score_only && aligner.status() != AlignStatus::Completed;
-        let (end_v, end_h) = if use_biwfa {
+        let (end_v, end_h, end_score) = if use_biwfa {
             // BiWFA always evaluates the score at the end (C's
             // `wavefront_bialign_compute_score`).
-            (pattern.len() as i32, text.len() as i32)
+            (pattern.len() as i32, text.len() as i32, None)
         } else {
             aligner
                 .unreached_end()
-                .unwrap_or((pattern.len() as i32, text.len() as i32))
+                .unwrap_or((pattern.len() as i32, text.len() as i32, None))
         };
+        // Score-only Z-drop: the score the end cell was reached at.
+        let wfa_score = end_score.unwrap_or(wfa_score);
         // Score-only output when there is no alignment to score. C prints a
         // failed BiWFA score as `cigar_clear`'s INT32_MIN, and an unreachable
         // one as the score where the search gave up, converted at the unset

@@ -207,22 +207,27 @@ fn drop(name: &str, heuristic: &str, params: &str, extra: &[&str]) -> Vec<String
 
 #[test]
 fn xdrop_zdrop_match_c() {
-    // X-drop previously had no effect (output equalled the unbanded alignment).
-    assert_eq!(drop("xd", "xdrop", "20,1", &[]), ["-1\t-", "-1\t-"]);
-    // Z-drop ends at the best-scoring cell: a max-trimmed partial alignment.
-    // Since C dcfc9ed the backtrace starts at the score that cell was found
-    // at (before, at the current score: pair 2 gave -20 3M1X3M1I17M1X1M1X8M,
-    // HPCBio/wfa2lib-rs#22). Expected outputs from C 8702abe.
-    assert_eq!(drop("zd", "zdrop", "20,1", &[]), ["0\t1M", "0\t3M"]);
+    // Expected outputs from C 8a302a4. With match == 0, X-drop and Z-drop
+    // score matches +1 since C 1b36cc1 (C scored them -1, so X-drop abandoned
+    // both pairs and Z-drop's best cell was the start, HPCBio/wfa2lib-rs#55),
+    // and a Z-drop must last longer than the largest penalty (C 064755b):
+    // neither cuts these pairs.
+    let full = [
+        "-116\t1M1I1M2X5M1X1M3X3M1X4M1D3M1X13M1D6M1D1X12M4X7M3X4M1D6M2X7M1X4M",
+        "-60\t3M1X3M1I17M1X1M1X8M1X2M1I1X11M1D3M1X16M1X2M1X5M1X19M",
+    ];
+    assert_eq!(drop("xd", "xdrop", "20,1", &[]), full);
+    assert_eq!(drop("zd", "zdrop", "20,1", &[]), full);
+    // Extension trims pair 1 to its maximal-scoring prefix.
     assert_eq!(
         drop("zd_ext", "zdrop", "20,1", &["--wfa-span=extension"]),
-        ["0\t1M", "0\t3M"]
+        ["0\t1M", full[1]]
     );
     // Score-only with a match reward: C evaluates the classic score at the
     // end position (the Z-drop cell, or the unset position when unreachable).
     let m = ["--affine-penalties=-3,5,3,2", "--wfa-score-only"];
     assert_eq!(drop("xd_s", "xdrop", "20,1", &m), ["163\t-", "213\t-"]);
-    assert_eq!(drop("zd_s", "zdrop", "20,1", &m), ["15\t-", "57\t-"]);
+    assert_eq!(drop("zd_s", "zdrop", "20,1", &m), ["163\t-", "213\t-"]);
 }
 
 #[test]
@@ -301,18 +306,16 @@ fn biwfa_heuristics_match_c() {
     let banded = ["-1\t-".to_string(), format!("-236\t{full}")];
     assert_eq!(biwfa("bi_bs", "banded-static", "-2,2", &[]), banded);
     assert_eq!(biwfa("bi_ba", "banded-adaptive", "-2,2,1", &[]), banded);
-    assert_eq!(biwfa("bi_xd", "xdrop", "20,1", &[]), ["-1\t-", "-1\t-"]);
-    // Score-only BiWFA only searches for the breakpoint; on failure C prints
-    // INT32_MIN.
-    assert_eq!(
-        biwfa("bi_xd_s", "xdrop", "20,1", &["--wfa-score-only"]),
-        ["-2147483648\t-", "-2147483648\t-"]
-    );
-    let m = ["--affine-penalties=-3,5,3,2", "--wfa-score-only"];
-    assert_eq!(
-        biwfa("bi_xd_ms", "xdrop", "100,1", &m),
-        ["539\t-", "589\t-"]
-    );
+    // C rejects X-drop/Z-drop with BiWFA since 7110ee3.
+    for (h, p) in [("xdrop", "20,1"), ("zdrop", "20,1")] {
+        let hh = format!("--wfa-heuristic={h}");
+        let pp = format!("--wfa-heuristic-parameters={p}");
+        let args = ["-a", "gap-affine-wfa", "--wfa-memory=ultralow", &hh, &pp];
+        assert!(
+            run_status(&format!("bi_{h}"), &DROP_PAIRS, &args).is_none(),
+            "{h}"
+        );
+    }
 }
 
 #[test]
@@ -361,7 +364,8 @@ fn memory_med_low_match_c() {
     // gives C's alignment. `high` differs from `med`/`low` in tie-breaks
     // only (C's Singletrack backtrace, a823d54); before C 0285b52 its CIGAR
     // was invalid (HPCBio/wfa2lib-rs#21). Expected outputs from C's driver
-    // (8702abe). `--wfa-memory=med|low` used to behave like `high`.
+    // (8a302a4, where X-drop scores matches +1 with match == 0: -942/-948
+    // before). `--wfa-memory=med|low` used to behave like `high`.
     let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
     let expected = |f: &str| fs::read_to_string(data.join(f)).unwrap();
     for (mem, alg) in [
@@ -388,10 +392,10 @@ fn memory_med_low_match_c() {
 fn unreachable_score_only_corrected_prints_minus_one() {
     // HPCBio/wfa2lib-rs#23: with no alignment, C's score-only output is a
     // score with nothing behind it. wfa.utest.seq pair 262 with X-drop 20,1
-    // and a match reward is unreachable: unidirectional C converts the score
-    // where it gave up at the unset end position (a signed overflow, -113),
-    // and BiWFA leaves INT32_MIN. Corrected mode prints -1, as CIGAR mode.
-    let drop = [
+    // and a match reward is unreachable: C converts the score where it gave
+    // up at the unset end position (a signed overflow, -113). Corrected mode
+    // prints -1, as CIGAR mode.
+    let mut args = vec![
         "-a",
         "gap-affine-wfa",
         "--affine-penalties=-3,5,3,2",
@@ -399,20 +403,9 @@ fn unreachable_score_only_corrected_prints_minus_one() {
         "--wfa-heuristic-parameters=20,1",
         "--wfa-score-only",
     ];
-    for (mem, c_out) in [
-        (None, "-113\t-\n"),
-        (Some("--wfa-memory=ultralow"), "-2147483648\t-\n"),
-    ] {
-        let mut args = drop.to_vec();
-        args.extend(mem);
-        assert_eq!(run_file("issue23_unreachable.seq", &args), c_out, "{mem:?}");
-        args.push("--no-c-compat");
-        assert_eq!(
-            run_file("issue23_unreachable.seq", &args),
-            "-1\t-\n",
-            "{mem:?}"
-        );
-    }
+    assert_eq!(run_file("issue23_unreachable.seq", &args), "-113\t-\n");
+    args.push("--no-c-compat");
+    assert_eq!(run_file("issue23_unreachable.seq", &args), "-1\t-\n");
 
     // With match == 0, C prints the negated score where it gave up.
     let pattern = "ACGTTGCAAGCT".repeat(10);
@@ -429,4 +422,12 @@ fn unreachable_score_only_corrected_prints_minus_one() {
     let mut args = band.to_vec();
     args.push("--no-c-compat");
     assert_eq!(run("unreachable_so", &[(&pattern, text)], &args), ["-1\t-"]);
+
+    // A failed BiWFA score leaves C's INT32_MIN (here with a match reward).
+    let mut args = band.to_vec();
+    args.extend(["--affine-penalties=-3,5,3,2", "--wfa-memory=ultralow"]);
+    let pair = [(pattern.as_str(), text)];
+    assert_eq!(run("unreachable_bi", &pair, &args), ["-2147483648\t-"]);
+    args.push("--no-c-compat");
+    assert_eq!(run("unreachable_bi", &pair, &args), ["-1\t-"]);
 }
