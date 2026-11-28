@@ -74,13 +74,14 @@ pub enum MemoryMode {
 ///
 /// - **Z-drop ends** (HPCBio/wfa2lib-rs#22): C backtraces the partial
 ///   alignment from the best cell's diagonal and offset but at the current
-///   score, where that cell needn't exist. High memory then finds no
-///   source and returns an empty CIGAR or one with unchecked matches
-///   (invalid with `match < 0`); med/low read a dead cell whose backtrace
-///   C never initialized, so C's result depends on earlier alignments.
-///   Corrected mode backtraces the best cell at the score it was found at,
-///   keeping its backtrace for med/low, so all memory modes give a valid
-///   partial alignment with the same score.
+///   score, where that cell needn't exist, in med/low memory, for
+///   gap-linear, and in BiWFA's end component (high-memory gap-affine/affine2p
+///   start at the right score since C dcfc9ed). Med/low read a dead cell
+///   whose backtrace C never initialized, so C's result depends on earlier
+///   alignments; gap-linear finds no source and returns an empty CIGAR or
+///   one with unchecked matches. Corrected mode backtraces the best cell at
+///   the score it was found at, keeping its backtrace for med/low, so all
+///   memory modes give a valid partial alignment with the same score.
 ///
 /// - **X-drop and Z-drop with `match == 0`** (HPCBio/wfa2lib-rs#55): their
 ///   Smith-Waterman score needs a stand-in match score, and C's is -1, so
@@ -1356,17 +1357,40 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
+    /// Whether the backtrace is Singletrack's (C's
+    /// `wavefront_unialign_singletrack`): high memory (wavefronts kept, no
+    /// piggyback) and gap-affine/affine2p. C also requires a full alignment
+    /// (Rust only backtraces then) and a regular, not BiWFA, aligner.
+    fn singletrack(&self) -> bool {
+        !self.wf_components.bt_piggyback
+            && !self.wf_components.memory_modular
+            && matches!(
+                self.penalties.distance_metric,
+                DistanceMetric::GapAffine | DistanceMetric::GapAffine2p
+            )
+    }
+
     /// Backtrace a Z-drop end, the best cell in `alignment_end_pos`, at the
-    /// current `score`, as C does. The cell was found at an earlier score
-    /// and needn't exist at `score`: high mode then finds no source (an empty
-    /// CIGAR, or unchecked matches), and med/low read a dead cell
-    /// (HPCBio/wfa2lib-rs#22). Corrected mode backtraces it at the score it
-    /// was found at, from the wavefronts (high) or from its backtrace kept
-    /// then (med/low).
+    /// current `score`, as C does for gap-linear and med/low. The cell was
+    /// found at an earlier score and needn't exist at `score`: high mode then
+    /// finds no source (an empty CIGAR, or unchecked matches), and med/low
+    /// read a dead cell (HPCBio/wfa2lib-rs#22). Since C dcfc9ed, C's high-memory
+    /// gap-affine/affine2p backtrace starts at the score the cell was found
+    /// at. Corrected mode always does, from the wavefronts (high) or from its
+    /// backtrace kept then (med/low).
     fn backtrace_zdrop_end(&mut self, score: i32) {
         let WavefrontPos { score: best_score, k, offset } = self.alignment_end_pos;
         if self.compat == Compat::C {
-            self.backtrace_from(score, k, offset);
+            let affine = matches!(
+                self.penalties.distance_metric,
+                DistanceMetric::GapAffine | DistanceMetric::GapAffine2p
+            );
+            let from = if affine && !self.wf_components.bt_piggyback && best_score >= 0 {
+                best_score
+            } else {
+                score
+            };
+            self.backtrace_from(from, k, offset);
         } else if self.wf_components.bt_piggyback {
             self.backtrace_piggyback_bt(self.zdrop_best_bt, best_score, k, offset);
         } else {
@@ -1375,10 +1399,30 @@ impl<const N: usize> WavefrontAligner<N> {
     }
 
     /// Backtrace the CIGAR from M-wavefront cell (`k`, `offset`), starting at
-    /// `score` (C's `wavefront_unialign_terminate`).
+    /// `score` (C's `wavefront_unialign_terminate`). High-memory
+    /// gap-affine/affine2p alignments use the Singletrack backtrace, as C
+    /// since a823d54 (BiWFA's base alignments don't come through here and
+    /// keep the classic one, as C's subsidiary aligner).
     fn backtrace_from(&mut self, score: i32, k: i32, offset: WfOffset) {
         if self.wf_components.bt_piggyback {
             self.backtrace_piggyback(score, k, offset);
+        } else if self.singletrack() {
+            let (pattern_begin_free, text_begin_free) = match self.alignment_span {
+                AlignmentSpan::End2End => (0, 0),
+                AlignmentSpan::EndsFree => (self.pattern_begin_free, self.text_begin_free),
+            };
+            backtrace::backtrace_affine_singletrack(
+                &self.wf_components,
+                &self.sequences,
+                &self.penalties,
+                pattern_begin_free,
+                text_begin_free,
+                score,
+                k,
+                offset,
+                ComponentType::M,
+                &mut self.cigar,
+            );
         } else {
             self.backtrace_components(score, k, offset, ComponentType::M, ComponentType::M);
         }
@@ -3038,11 +3082,18 @@ impl<const N: usize> WavefrontAligner<N> {
                 Ok(score)
             }
             AlignStatus::EndUnreachable if pos.offset != OFFSET_NULL => {
-                // C starts at the current score, in `component_end`;
-                // corrected mode at the best cell's score, in M (the cell is
-                // an M cell; HPCBio/wfa2lib-rs#22, as `backtrace_zdrop_end`).
+                // C starts in `component_end`, at the best cell's score for
+                // gap-affine/affine2p (since C dcfc9ed) and at the current
+                // score for gap-linear; corrected mode at the best cell's
+                // score, in M (the cell is an M cell; HPCBio/wfa2lib-rs#22, as
+                // `backtrace_zdrop_end`).
                 if base.compat == Compat::C {
-                    base.backtrace_components(score, pos.k, pos.offset, component_begin, component_end);
+                    let affine = matches!(
+                        base.penalties.distance_metric,
+                        DistanceMetric::GapAffine | DistanceMetric::GapAffine2p
+                    );
+                    let from = if affine && pos.score >= 0 { pos.score } else { score };
+                    base.backtrace_components(from, pos.k, pos.offset, component_begin, component_end);
                 } else {
                     base.backtrace_components(pos.score, pos.k, pos.offset, component_begin, ComponentType::M);
                 }

@@ -33,7 +33,7 @@ Checked with `tests/differential/run.sh` (1262 cases against the C commit in
 | Configuration | vs C |
 |---|---|
 | indel, edit, gap-linear, gap-affine, gap-affine2p; custom penalties; wfa-adaptive | Byte-identical, all memory modes (high / score-only / med / BiWFA / BiWFA score-only) |
-| Stock `wfa.utest.sh` | 65/65 identical at C add8f26, incl. its X-drop line (BiWFA match < 0 tie-breaks fixed, HPCBio/wfa2lib-rs#7) |
+| Stock `wfa.utest.sh` | 64/64 identical at C 8702abe (its `test.affine.xdrop` fixture is stale there, skipped; 65/65 at add8f26) (BiWFA match < 0 tie-breaks fixed, HPCBio/wfa2lib-rs#7) |
 | banded-static (affine, affine2p, linear) | Byte-identical to C 3282f83 (with Marco-Sola-Lab/WFA2-lib#125's band clamp) in high / med / score-only modes, including unreachable pairs |
 | banded-static (edit, indel) | Rust stops as unreachable; C never terminates (C bug, HPCBio/wfa2lib-rs#24) |
 | banded-adaptive | C's re-centred band ported (HPCBio/wfa2lib-rs#6): byte-identical to C 3282f83 in high / score-only / med / low (48/48) |
@@ -69,9 +69,17 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   wavefront a heuristic cutoff trims to empty gets an empty initialized
   range, so X-drop with steps > 1 gives valid CIGARs (HPCBio/wfa2lib-rs#21).
   Was corrected-mode only; now unconditional. Pinned C 6176f94 → add8f26.
-- [ ] Rest of 8a302a4 (Marco-Sola-Lab/WFA2-lib#150 Singletrack, #151
-  heuristics): assessed 2026-11-27, to be ported in steps (#151 heuristics
-  in C mode, BiWFA rejects X/Z-drop, Singletrack).
+- [x] a823d54 / 8702abe (Marco-Sola-Lab/WFA2-lib#150): Singletrack backtrace
+  for high-memory gap-affine/affine2p (M wavefronts only; different
+  tie-breaks, same scores). Ported in `backtrace::backtrace_affine_singletrack`.
+  C also recycles I/D wavefronts (2–5× less memory): not ported yet
+  (PERFORMANCE_LOG 2026-11-27). Pinned C add8f26 → 8702abe.
+- [x] dcfc9ed (Marco-Sola-Lab/WFA2-lib#150): high-memory gap-affine/affine2p
+  Z-drop ends backtraced from the score the best cell was found at (the
+  high-memory half of HPCBio/wfa2lib-rs#22), unidirectional and BiWFA's base.
+- n/a 561bbb8: CIGAR buffer padding for C's 8-byte block writers.
+- [ ] Rest of 8a302a4 (Marco-Sola-Lab/WFA2-lib#151 heuristics): assessed
+  2026-11-27, to be ported next (BiWFA rejects X/Z-drop).
 - n/a 061509a SAM CIGAR table (no SAM output in Rust); build, packaging and
   C++-binding commits.
 
@@ -82,8 +90,9 @@ C changes after the port baseline that affect behaviour (HPCBio/wfa2lib-rs#10):
   the current score, often a dead cell whose chain comes from uninitialized
   memory, so C's output depends on earlier alignments. Rust reads such
   cells as zeroes (deterministic; matches C on fresh memory). C's high mode
-  backtraces at the same wrong score (empty or invalid CIGARs). **Fixed in
-  corrected mode** (FIXED_BUGS 14e).
+  backtraced at the same wrong score (empty or invalid CIGARs); fixed in C
+  dcfc9ed for gap-affine/affine2p and ported (gap-linear: C bbfe1ed, not yet
+  pinned). **Fixed in corrected mode** (FIXED_BUGS 14e).
 - HPCBio/wfa2lib-rs#55: X-drop/Z-drop with `match == 0` use a sign-flipped
   Smith-Waterman score (C regression from 51fb1aa): X-drop abandons most
   divergent pairs, Z-drop's best cell is the start. **Fixed in corrected
@@ -242,3 +251,9 @@ reports, inbound C ports) is tracked in HPCBio/wfa2lib-rs#19.
   (our fix for HPCBio/wfa2lib-rs#21) merged upstream, so the fix is
   unconditional, with C's `[lo, hi]` empty range. Differential suite: only
   the 20 known #22 diffs.
+- **2026-11-27:** C `C_COMMIT` add8f26 → 8702abe (Marco-Sola-Lab/WFA2-lib#150):
+  Singletrack backtrace ported (high-memory gap-affine/affine2p; 185
+  differential cases changed in C, all identical), and dcfc9ed's Z-drop
+  start score in C mode. Differential suite: only the 20 known #22 diffs.
+  Backtrace cost-neutral; C's I/D recycling (its memory saving) is next for
+  #31.

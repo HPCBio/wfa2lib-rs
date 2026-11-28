@@ -210,13 +210,13 @@ fn xdrop_zdrop_match_c() {
     // X-drop previously had no effect (output equalled the unbanded alignment).
     assert_eq!(drop("xd", "xdrop", "20,1", &[]), ["-1\t-", "-1\t-"]);
     // Z-drop ends at the best-scoring cell: a max-trimmed partial alignment.
-    assert_eq!(
-        drop("zd", "zdrop", "20,1", &[]),
-        ["0\t1M", "-20\t3M1X3M1I17M1X1M1X8M"]
-    );
+    // Since C dcfc9ed the backtrace starts at the score that cell was found
+    // at (before, at the current score: pair 2 gave -20 3M1X3M1I17M1X1M1X8M,
+    // HPCBio/wfa2lib-rs#22). Expected outputs from C 8702abe.
+    assert_eq!(drop("zd", "zdrop", "20,1", &[]), ["0\t1M", "0\t3M"]);
     assert_eq!(
         drop("zd_ext", "zdrop", "20,1", &["--wfa-span=extension"]),
-        ["0\t1M", "-20\t3M1X3M1I17M1X1M1X8M"]
+        ["0\t1M", "0\t3M"]
     );
     // Score-only with a match reward: C evaluates the classic score at the
     // end position (the Z-drop cell, or the unset position when unreachable).
@@ -358,13 +358,17 @@ fn run_file(name: &str, args: &[&str]) -> String {
 #[test]
 fn memory_med_low_match_c() {
     // wfa.utest.seq pair 201 with X-drop every 10 steps: every memory mode
-    // gives C's alignment. Before C 0285b52, C's `high` CIGAR was invalid
-    // here (HPCBio/wfa2lib-rs#21); `med`/`low` (piggyback backtrace) were
-    // always valid. Expected output from C's driver (add8f26).
-    // `--wfa-memory=med|low` used to behave like `high`.
+    // gives C's alignment. `high` differs from `med`/`low` in tie-breaks
+    // only (C's Singletrack backtrace, a823d54); before C 0285b52 its CIGAR
+    // was invalid (HPCBio/wfa2lib-rs#21). Expected outputs from C's driver
+    // (8702abe). `--wfa-memory=med|low` used to behave like `high`.
     let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
-    let expected = fs::read_to_string(data.join("xdrop_med.alg")).unwrap();
-    for mem in ["med", "low", "high"] {
+    let expected = |f: &str| fs::read_to_string(data.join(f)).unwrap();
+    for (mem, alg) in [
+        ("med", "xdrop_med.med_low.alg"),
+        ("low", "xdrop_med.med_low.alg"),
+        ("high", "xdrop_med.high.alg"),
+    ] {
         let mem = format!("--wfa-memory={mem}");
         let out = run_file(
             "xdrop_med.seq",
@@ -376,7 +380,7 @@ fn memory_med_low_match_c() {
                 "--wfa-heuristic-parameters=50,10",
             ],
         );
-        assert_eq!(out, expected, "{mem}");
+        assert_eq!(out, expected(alg), "{mem}");
     }
 }
 

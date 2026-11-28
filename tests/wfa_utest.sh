@@ -37,6 +37,13 @@ compare() {
         echo "  SKIP $name (no reference file)"
         return
     fi
+    # C 8702abe (Singletrack) did not regenerate this fixture, so C fails it
+    # too; C 98e208d (Marco-Sola-Lab/WFA2-lib#151) regenerates it.
+    if [ "$name" = "test.affine.xdrop" ] &&
+       [ "$(cat "$PROJECT_DIR/tests/differential/C_COMMIT")" = "8702abe" ]; then
+        echo "  SKIP $name (C's fixture is stale at 8702abe)"
+        return
+    fi
 
     if diff -q "$output" "$reference" > /dev/null 2>&1; then
         echo "  OK   $name"
